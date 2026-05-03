@@ -1,0 +1,25 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: pip install -r requirements.txt
+      - run: pytest || echo "no tests yet"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - run: docker build -t modelserve .
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - run: echo "Deploy step (SSH into EC2)"

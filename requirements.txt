@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+mlflow
+scikit-learn
+pandas
+prometheus-client
+psycopg2-binary
