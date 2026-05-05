@@ -1,0 +1,150 @@
+groups:
+  - name: ModelServe
+    interval: 30s
+    rules:
+      # High latency warning
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(prediction_duration_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: modelserve-api
+        annotations:
+          summary: "High latency detected on ModelServe API"
+          description: "p95 latency is {{ $value | humanizeDuration }} (threshold: 500ms)"
+          runbook_url: "https://docs.modelserve.example.com/runbook#high-latency"
+
+      # Critical latency
+      - alert: CriticalLatency
+        expr: histogram_quantile(0.95, rate(prediction_duration_seconds_bucket[5m])) > 2
+        for: 2m
+        labels:
+          severity: critical
+          service: modelserve-api
+        annotations:
+          summary: "Critical latency on ModelServe API"
+          description: "p95 latency is {{ $value | humanizeDuration }} (threshold: 2s)"
+          runbook_url: "https://docs.modelserve.example.com/runbook#critical-latency"
+
+      # High error rate
+      - alert: HighErrorRate
+        expr: rate(prediction_errors_total[5m]) / rate(prediction_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: modelserve-api
+        annotations:
+          summary: "Elevated error rate on ModelServe API"
+          description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+
+      # Critical error rate
+      - alert: CriticalErrorRate
+        expr: rate(prediction_errors_total[5m]) / rate(prediction_requests_total[5m]) > 0.15
+        for: 2m
+        labels:
+          severity: critical
+          service: modelserve-api
+        annotations:
+          summary: "Critical error rate on ModelServe API"
+          description: "Error rate is {{ $value | humanizePercentage }} (threshold: 15%)"
+          runbook_url: "https://docs.modelserve.example.com/runbook#critical-errors"
+
+      # Model not loaded
+      - alert: ModelNotLoaded
+        expr: up{job="modelserve-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: modelserve-api
+        annotations:
+          summary: "ModelServe API is down"
+          description: "The API has been unreachable for more than 1 minute"
+          runbook_url: "https://docs.modelserve.example.com/runbook#service-down"
+
+      # High request rate
+      - alert: HighRequestRate
+        expr: rate(prediction_requests_total[5m]) > 500
+        for: 10m
+        labels:
+          severity: warning
+          service: modelserve-api
+        annotations:
+          summary: "High request rate detected"
+          description: "Request rate is {{ $value | humanize }} rps (capacity warning)"
+
+      # Service components down
+      - alert: RedisDown
+        expr: up{job="modelserve-redis"} == 0
+        for: 1m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "Redis is down"
+          description: "Feature store Redis is unreachable"
+          runbook_url: "https://docs.modelserve.example.com/runbook#redis-down"
+
+      - alert: PostgreSQLDown
+        expr: up{job="modelserve-postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: postgresql
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "MLflow backend database is unreachable"
+          runbook_url: "https://docs.modelserve.example.com/runbook#database-down"
+
+      - alert: MLflowDown
+        expr: up{job="modelserve-mlflow"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          service: mlflow
+        annotations:
+          summary: "MLflow tracking server is down"
+          description: "MLflow is unreachable - model registry may be unavailable"
+
+      # Memory pressure
+      - alert: HighMemoryUsage
+        expr: (process_resident_memory_bytes{job="modelserve-api"} / container_spec_memory_limit_bytes{job="modelserve-api"}) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+          service: modelserve-api
+        annotations:
+          summary: "High memory usage on ModelServe API"
+          description: "Memory usage is above 85% of limit"
+
+      # Disk space
+      - alert: LowDiskSpace
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: "Low disk space"
+          description: "Available disk space is below 10%"
+
+      # No recent predictions
+      - alert: NoRecentPredictions
+        expr: increase(prediction_requests_total[30m]) == 0
+        for: 35m
+        labels:
+          severity: info
+          service: modelserve-api
+        annotations:
+          summary: "No predictions in the last 30 minutes"
+          description: "This may indicate a traffic issue or service problem"
+
+      # Model version stale
+      - alert: ModelVersionStale
+        expr: time() - prediction_model_last_updated_timestamp > 604800
+        for: 1h
+        labels:
+          severity: warning
+          service: ml-platform
+        annotations:
+          summary: "Model has not been updated in 7 days"
+          description: "Consider retraining or retiring this model version"

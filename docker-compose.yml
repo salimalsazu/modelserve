@@ -1,47 +1,167 @@
-version: "3.9"
+# Docker Compose configuration for ModelServe
+# Services: API, MLflow, PostgreSQL, Redis, Prometheus, Grafana
+
+version: "3.8"
 
 services:
+  # FastAPI Application
   api:
-    build: .
-    container_name: fastapi
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: modelserve-api
     ports:
       - "8000:8000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MODEL_NAME=modelserve-model
+      - MODEL_STAGE=Production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - FEAST_CONFIG_PATH=/app/feast_repo/feature_store.yaml
     depends_on:
       - mlflow
       - redis
+    networks:
+      - modelserve
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
-  redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
-
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: mlflow
-    ports:
-      - "5432:5432"
-
+  # MLflow Tracking Server
   mlflow:
-    image: ghcr.io/mlflow/mlflow
-    command: >
-      mlflow server 
-      --backend-store-uri postgresql://postgres:postgres@postgres:5432/mlflow 
-      --default-artifact-root /mlflow/artifacts 
-      --host 0.0.0.0
+    image: ghcr.io/mlflow/mlflow:v2.8.0
+    container_name: modelserve-mlflow
     ports:
       - "5000:5000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_BACKEND_STORE=postgresql://mlflow:mlflow@postgres:5432/mlflow
+      - MLFLOW_ARTIFACT_ROOT=s3://modelserve-artifacts/mlflow/
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+    depends_on:
+      - postgres
+    networks:
+      - modelserve
+    restart: unless-stopped
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://mlflow:mlflow@postgres:5432/mlflow
+      --default-artifact-root s3://modelserve-artifacts/mlflow/
+      --host 0.0.0.0
+      --port 5000
 
-  prometheus:
-    image: prom/prometheus
+  # PostgreSQL for MLflow
+  postgres:
+    image: postgres:15-alpine
+    container_name: modelserve-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=mlflow
+      - POSTGRES_PASSWORD=mlflow
+      - POSTGRES_DB=mlflow
     volumes:
-      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - modelserve
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Feature Store (online)
+  redis:
+    image: redis:7-alpine
+    container_name: modelserve-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - modelserve
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: modelserve-prometheus
     ports:
       - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - modelserve
+    restart: unless-stopped
 
+  # Grafana Dashboard
   grafana:
-    image: grafana/grafana
+    image: grafana/grafana:10.1.0
+    container_name: modelserve-grafana
     ports:
       - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    depends_on:
+      - prometheus
+    networks:
+      - modelserve
+    restart: unless-stopped
+
+  # Feature Store (Feast)
+  feast:
+    image: feastproject/feast:latest
+    container_name: modelserve-feast
+    ports:
+      - "6565:6565"
+    environment:
+      - FEAST_CONFIG_PATH=/app/feast_repo/feature_store.yaml
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./feast_repo:/app/feast_repo
+      - feast_data:/app/data
+    depends_on:
+      - redis
+    networks:
+      - modelserve
+    command: feast materialization_worker
+
+networks:
+  modelserve:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  feast_data:

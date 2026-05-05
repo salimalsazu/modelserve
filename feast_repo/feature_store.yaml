@@ -1,0 +1,66 @@
+# Feast Feature Store Configuration for ModelServe
+# Online store: Redis | Offline store: Local filesystem (Parquet)
+
+project: modelserve
+registry: data/registry.db
+provider: aws
+
+# Offline store configuration (for training)
+offline_store:
+  type: file
+  path: data/
+
+# Online store configuration (for serving)
+online_store:
+  type: redis
+  redis_host: redis
+  redis_port: 6379
+  redis_db: 0
+
+# Entity configuration
+entity_keys:
+  - entity_id
+
+# Feature tables (registered feature views)
+feature_tables:
+  - name: entity_features
+    entities:
+      - entity_id
+    ttl: 2592000  # 30 days in seconds
+    schema:
+      - name: feature_0
+        type: float
+      - name: feature_1
+        type: float
+      - name: feature_2
+        type: float
+      - name: feature_3
+        type: float
+      - name: feature_4
+        type: float
+      - name: feature_5
+        type: float
+      - name: feature_6
+        type: float
+      - name: feature_7
+        type: float
+      - name: feature_8
+        type: float
+      - name: feature_9
+        type: float
+
+  - name: aggregated_features
+    entities:
+      - entity_id
+    ttl: 604800  # 7 days in seconds
+    schema:
+      - name: count_last_7d
+        type: int
+      - name: sum_last_7d
+        type: float
+      - name: avg_last_7d
+        type: float
+      - name: max_last_7d
+        type: float
+      - name: min_last_7d
+        type: float

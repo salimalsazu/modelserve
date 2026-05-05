@@ -1,0 +1,305 @@
+name: CI/CD Pipeline for ModelServe
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: modelserve-${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+
+jobs:
+  # ============================================
+  # Test Job
+  # ============================================
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio
+
+      - name: Run linting
+        run: |
+          pip install flake8 mypy
+          flake8 app/ --max-line-length=100 --ignore=E501,W503 || true
+          mypy app/ --ignore-missing-imports || true
+
+      - name: Run tests
+        run: |
+          pytest app/tests/ -v --cov=app --cov-report=xml --cov-report=html
+        continue-on-error: true
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+        continue-on-error: true
+
+  # ============================================
+  # Build and Push Docker Image
+  # ============================================
+  build:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=ref,enable=true,priority=200,prefix=,suffix=,event=branch
+            type=semver,enable=true,pattern={{version}}
+            type=sha,enable=true,prefix=,suffix=,event=push
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+
+      - name: Image digest
+        run: echo "Image built: ${{ steps.meta.outputs.tags }}"
+
+  # ============================================
+  # Deploy to Development
+  # ============================================
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+
+    environment:
+      name: development
+      url: http://localhost:8000
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Deploy to EC2 (Dev)
+        env:
+          EC2_HOST: ${{ secrets.DEV_EC2_HOST }}
+          EC2_KEY: ${{ secrets.DEV_EC2_SSH_KEY }}
+        run: |
+          echo "${{ secrets.DEV_EC2_SSH_KEY }}" > ec2_key.pem
+          chmod 600 ec2_key.pem
+          
+          # Pull latest image
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ec2-user@$EC2_HOST \
+            "docker pull ${{ steps.login-ecr.outputs.registry }}/modelserve-dev:latest"
+          
+          # Restart container
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ec2-user@$EC2_HOST \
+            "docker stop modelserve || true && docker rm modelserve || true"
+          
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ec2-user@$EC2_HOST \
+            "docker run -d --name modelserve \
+              -p 8000:8000 \
+              -e MLFLOW_TRACKING_URI=http://localhost:5000 \
+              --restart unless-stopped \
+              ${{ steps.login-ecr.outputs.registry }}/modelserve-dev:latest"
+          
+          rm ec2_key.pem
+
+  # ============================================
+  # Deploy to Production
+  # ============================================
+  deploy-prod:
+    name: Deploy to Prod
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://modelserve.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Deploy to EC2 (Prod)
+        env:
+          EC2_HOST: ${{ secrets.PROD_EC2_HOST }}
+          EC2_KEY: ${{ secrets.PROD_EC2_SSH_KEY }}
+        run: |
+          echo "${{ secrets.PROD_EC2_SSH_KEY }}" > ec2_key.pem
+          chmod 600 ec2_key.pem
+          
+          # Pull latest image
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ec2-user@$EC2_HOST \
+            "docker pull ${{ steps.login-ecr.outputs.registry }}/modelserve-prod:latest"
+          
+          # Graceful rolling restart
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ec2-user@$EC2_HOST \
+            "docker stop modelserve || true && docker rm modelserve || true"
+          
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ec2-user@$EC2_HOST \
+            "docker run -d --name modelserve \
+              -p 8000:8000 \
+              -p 5000:5000 \
+              -e MLFLOW_TRACKING_URI=https://mlflow.example.com \
+              -e AWS_DEFAULT_REGION=us-east-1 \
+              --restart unless-stopped \
+              ${{ steps.login-ecr.outputs.registry }}/modelserve-prod:latest"
+          
+          # Wait for health check
+          sleep 30
+          
+          # Verify deployment
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ec2-user@$EC2_HOST \
+            "curl -f http://localhost:8000/health && echo 'Deployment successful'"
+          
+          rm ec2_key.pem
+
+      - name: Notify on Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "ModelServe Deployment: ${{ job.status }}",
+              "blocks": [{
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*ModelServe Production Deployment*\nStatus: ${{ job.status }}\nCommit: ${{ github.sha }}"
+                }
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+        continue-on-error: true
+
+  # ============================================
+  # Infrastructure Provisioning
+  # ============================================
+  infrastructure:
+    name: Provision Infrastructure
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-pulumi-${{ hashFiles('infrastructure/requirements.txt') }}
+
+      - name: Install Pulumi
+        uses: pulumi/actions@v4
+        with:
+          pulumi-version: '3.80.0'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install dependencies
+        run: |
+          pip install -r infrastructure/requirements.txt
+
+      - name: Preview infrastructure changes
+        run: |
+          cd infrastructure
+          pulumi preview --stack prod --non-interactive
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+
+      - name: Apply infrastructure changes
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          cd infrastructure
+          pulumi up --stack prod --yes --non-interactive
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}

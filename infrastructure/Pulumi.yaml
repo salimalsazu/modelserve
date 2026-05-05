@@ -1,0 +1,13 @@
+name: modelserve-infra
+runtime: python
+description: AWS infrastructure for ModelServe (EC2, S3, ECR)
+
+config:
+  environment:
+    type: String
+    default: dev
+    description: Deployment environment (dev, staging, prod)
+  aws_region:
+    type: String
+    default: us-east-1
+    description: AWS region for resources
