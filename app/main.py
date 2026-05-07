@@ -17,9 +17,9 @@ import numpy as np
 from datetime import datetime
 import logging
 
-from model_loader import load_model, get_model_info
-from feature_client import FeatureStoreClient
-from metrics import (
+from app.model_loader import load_model, get_model_info
+from app.feature_client import FeatureStoreClient
+from app.metrics import (
     prediction_requests,
     prediction_errors,
     prediction_latency,
@@ -147,14 +147,18 @@ def predict(data: PredictRequest):
     Make predictions using the registered MLflow model.
     Supports batch predictions for multiple entities.
     """
-    prediction_requests.inc()
+    model_info = get_model_info()
+    endpoint = "predict"
+    stage = model_info.get("stage", "unknown")
+    
+    prediction_requests.labels(endpoint=endpoint, model_stage=stage).inc()
     
     if model is None:
-        prediction_errors.inc()
+        prediction_errors.labels(endpoint=endpoint, error_type="model_not_loaded").inc()
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     try:
-        with prediction_latency.time():
+        with prediction_latency.labels(endpoint=endpoint, model_stage=stage).time():
             # Prepare features
             features = np.array(data.features).reshape(1, -1)
             
@@ -170,20 +174,17 @@ def predict(data: PredictRequest):
                 except Exception:
                     pass
             
-            # Get model info
-            model_info = get_model_info()
-            
             return PredictResponse(
                 prediction=int(prediction[0]),
                 probability=probability,
                 model_version=model_info.get("version", "unknown"),
-                model_stage=model_info.get("stage", "Production"),
+                model_stage=stage,
                 timestamp=datetime.utcnow().isoformat() + "Z",
                 latency_ms=0,  # Latency tracked by histogram
             )
     
     except Exception as e:
-        prediction_errors.inc()
+        prediction_errors.labels(endpoint=endpoint, error_type="prediction_failed").inc()
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -197,16 +198,20 @@ def predict_with_explain(
     """
     Get features from Feast and make predictions with optional explanations.
     """
-    prediction_requests.inc()
+    model_info = get_model_info()
+    endpoint = "predict_explain"
+    stage = model_info.get("stage", "unknown")
+    
+    prediction_requests.labels(endpoint=endpoint, model_stage=stage).inc()
     
     if model is None:
-        prediction_errors.inc()
+        prediction_errors.labels(endpoint=endpoint, error_type="model_not_loaded").inc()
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     try:
-        with prediction_latency.time():
+        with prediction_latency.labels(endpoint=endpoint, model_stage=stage).time():
             # Fetch features from feature store
-            with feature_store_latency.time():
+            with feature_store_latency.labels(entity_type="user").time():
                 if feature_client is None:
                     raise HTTPException(status_code=503, detail="Feature store not available")
                 
@@ -247,13 +252,11 @@ def predict_with_explain(
                     for i in range(len(features))
                 ]
             
-            model_info = get_model_info()
-            
             return ExplainResponse(
                 prediction=int(prediction[0]),
                 probability=probability,
                 model_version=model_info.get("version", "unknown"),
-                model_stage=model_info.get("stage", "Production"),
+                model_stage=stage,
                 timestamp=datetime.utcnow().isoformat() + "Z",
                 latency_ms=0,
                 feature_importance=feature_importance,
@@ -263,7 +266,7 @@ def predict_with_explain(
     except HTTPException:
         raise
     except Exception as e:
-        prediction_errors.inc()
+        prediction_errors.labels(endpoint=endpoint, error_type="prediction_failed").inc()
         logger.error(f"Prediction with explain error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 

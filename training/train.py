@@ -44,48 +44,23 @@ MODEL_TYPE = os.getenv("MODEL_TYPE", "random_forest")
 
 
 def load_data(path: str) -> Tuple[pd.DataFrame, pd.Series]:
-    """Load training data from CSV file."""
-    logger.info(f"Loading data from {path}")
+    """Load training data from CSV."""
+    if os.path.exists(path):
+        logger.info(f"Loading data from {path}")
+        df = pd.read_csv(path)
+        X = df.drop("target", axis=1)
+        y = df["target"]
+        return X, y
     
-    if not os.path.exists(path):
-        # Generate synthetic data for demonstration
-        logger.warning(f"Data file not found: {path}. Generating synthetic data.")
-        return generate_synthetic_data()
-    
-    df = pd.read_csv(path)
-    
-    # Assume last column is target
-    X = df.iloc[:, :-1]
-    y = df.iloc[:, -1]
-    
-    logger.info(f"Loaded {len(X)} samples with {X.shape[1]} features")
-    return X, y
-
-
-def generate_synthetic_data(n_samples: int = 1000, n_features: int = 10) -> Tuple[pd.DataFrame, pd.Series]:
-    """Generate synthetic data for demonstration purposes."""
+    logger.warning(f"Data file not found: {path}. Generating synthetic data.")
     np.random.seed(42)
-    
+    n_samples = 1000
+    n_features = 10
     X = pd.DataFrame(
-        np.random.randn(n_samples, n_features),
+        np.random.rand(n_samples, n_features),
         columns=[f"feature_{i}" for i in range(n_features)]
     )
-    
-    # Create target with some signal
-    y = (
-        X["feature_0"] * 0.5 +
-        X["feature_1"] * 0.3 +
-        X["feature_2"] * 0.2 +
-        np.random.randn(n_samples) * 0.5
-    > 0
-    ).astype(int)
-    
-    # Save to file
-    os.makedirs("training", exist_ok=True)
-    df = pd.concat([X, y.rename("target")], axis=1)
-    df.to_csv("training/data.csv", index=False)
-    
-    logger.info(f"Generated synthetic data: {n_samples} samples")
+    y = pd.Series(np.random.randint(0, 2, n_samples))
     return X, y
 
 
@@ -93,251 +68,192 @@ def train_model(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     model_type: str = "random_forest",
-    hyperparams: Optional[dict] = None,
-) -> object:
-    """Train a model based on the specified type."""
+    n_estimators: int = 100,
+    max_depth: Optional[int] = None,
+) -> RandomForestClassifier:
+    """Train a sklearn model."""
     logger.info(f"Training {model_type} model")
     
     if model_type == "random_forest":
         model = RandomForestClassifier(
-            n_estimators=hyperparams.get("n_estimators", 100) if hyperparams else 100,
-            max_depth=hyperparams.get("max_depth", 10) if hyperparams else 10,
-            min_samples_split=hyperparams.get("min_samples_split", 5) if hyperparams else 5,
+            n_estimators=n_estimators,
+            max_depth=max_depth or 10,
             random_state=42,
             n_jobs=-1,
         )
     elif model_type == "gradient_boosting":
         model = GradientBoostingClassifier(
-            n_estimators=hyperparams.get("n_estimators", 100) if hyperparams else 100,
-            max_depth=hyperparams.get("max_depth", 5) if hyperparams else 5,
-            learning_rate=hyperparams.get("learning_rate", 0.1) if hyperparams else 0.1,
+            n_estimators=n_estimators,
+            max_depth=max_depth or 5,
             random_state=42,
         )
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     
     model.fit(X_train, y_train)
-    logger.info(f"Model training complete: {type(model).__name__}")
-    
+    logger.info(f"Model training complete: {model.__class__.__name__}")
     return model
 
 
 def evaluate_model(
-    model: object,
+    model,
     X_test: pd.DataFrame,
     y_test: pd.Series,
 ) -> dict:
     """Evaluate model and return metrics."""
     y_pred = model.predict(X_test)
-    y_proba = None
-    
-    if hasattr(model, "predict_proba"):
-        y_proba = model.predict_proba(X_test)[:, 1]
     
     metrics = {
         "accuracy": accuracy_score(y_test, y_pred),
         "precision": precision_score(y_test, y_pred, average="weighted"),
         "recall": recall_score(y_test, y_pred, average="weighted"),
         "f1": f1_score(y_test, y_pred, average="weighted"),
+        "roc_auc": roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]),
     }
     
-    if y_proba is not None:
-        try:
-            metrics["roc_auc"] = roc_auc_score(y_test, y_proba)
-        except Exception:
-            pass
-    
-    # Cross-validation score
+    # Cross-validation
     cv_scores = cross_val_score(model, X_test, y_test, cv=5)
     metrics["cv_mean"] = cv_scores.mean()
     metrics["cv_std"] = cv_scores.std()
     
     logger.info(f"Metrics: {metrics}")
-    
     return metrics
 
 
 def log_to_mlflow(
-    model: object,
+    model,
     metrics: dict,
     X_train: pd.DataFrame,
-    model_type: str,
-    tags: Optional[dict] = None,
+    input_example,
 ) -> str:
-    """Log model and metrics to MLflow."""
-    # Set up MLflow
+    """Log model, metrics, and artifacts to MLflow."""
+    import warnings
+    # Suppress deprecation warning for artifact_path
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    
+    # Set up MLflow tracking
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(EXPERIMENT_NAME)
     
-    # Start run
-    with mlflow.start_run(run_name=f"{model_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}") as run:
+    with mlflow.start_run() as run:
         run_id = run.info.run_id
+        logger.info(f"MLflow run ID: {run_id}")
         
         # Log parameters
-        params = {
-            "model_type": model_type,
+        mlflow.log_params({
+            "model_type": MODEL_TYPE,
             "n_features": X_train.shape[1],
             "n_samples": X_train.shape[0],
-        }
-        
-        if hasattr(model, "n_estimators"):
-            params["n_estimators"] = model.n_estimators
-        if hasattr(model, "max_depth"):
-            params["max_depth"] = model.max_depth
-        
-        mlflow.log_params(params)
+        })
         
         # Log metrics
         mlflow.log_metrics(metrics)
         
-        # Log model
+        # Log model using artifact_path (deprecated but compatible)
+        artifact_path = "model"
         mlflow.sklearn.log_model(
             model,
-            "model",
+            artifact_path,
             registered_model_name=MODEL_NAME,
         )
         
-        # Log feature names
-        mlflow.log_param("feature_names", ",".join(X_train.columns.tolist()))
+        # Log feature importance if available
+        if hasattr(model, "feature_importances_"):
+            importance = pd.DataFrame({
+                "feature": X_train.columns,
+                "importance": model.feature_importances_,
+            }).sort_values("importance", ascending=False)
+            importance_path = "feature_importance.csv"
+            importance.to_csv(importance_path, index=False)
+            mlflow.log_artifact(importance_path)
         
-        # Add custom tags
-        if tags:
-            for key, value in tags.items():
-                mlflow.set_tag(key, value)
-        
-        # Log training timestamp
-        mlflow.set_tag("training_timestamp", datetime.utcnow().isoformat())
-        
-        logger.info(f"Logged to MLflow: run_id={run_id}")
-        
-        return run_id
+        logger.info(f"Model logged to MLflow with registered name: {MODEL_NAME}")
+    
+    return run_id
 
 
 def register_model_version(stage: str = "Production") -> Optional[str]:
-    """Register the latest model version in MLflow registry."""
-    try:
-        client = MlflowClient()
-        
-        # Get latest model versions
-        versions = client.get_latest_versions(MODEL_NAME)
-        
-        if not versions:
-            logger.warning("No model versions found in registry")
-            return None
-        
-        latest_version = versions[0].version
-        
-        # Transition to target stage
-        client.transition_model_version_stage(
-            name=MODEL_NAME,
-            version=latest_version,
-            stage=stage,
-        )
-        
-        logger.info(f"Registered model version {latest_version} as {stage}")
-        
-        # Add description
-        client.update_model_version(
-            name=MODEL_NAME,
-            version=latest_version,
-            description=f"Production model registered at {datetime.utcnow().isoformat()}",
-        )
-        
-        return str(latest_version)
+    """Register a model version and transition to stage."""
+    client = MlflowClient()
     
-    except Exception as e:
-        logger.error(f"Failed to register model: {e}")
-        return None
-
-
-def archive_previous_production() -> None:
-    """Archive the current production model before deploying new one."""
     try:
-        client = MlflowClient()
-        
-        # Find current production version
-        versions = client.get_latest_versions(MODEL_NAME, stages=["Production"])
-        
-        for v in versions:
+        # Get all versions of the model
+        versions = client.get_latest_versions(MODEL_NAME, stages=["None", "Staging", "Production"])
+        if versions:
+            latest_version = versions[0].version
+            logger.info(f"Latest model version: {latest_version}")
+            
+            # Transition to stage
             client.transition_model_version_stage(
-                name=MODEL_NAME,
-                version=v.version,
-                stage="Archived",
+                MODEL_NAME,
+                latest_version,
+                stage,
             )
-            logger.info(f"Archived previous production model: version {v.version}")
-    
+            logger.info(f"Model version {latest_version} transitioned to {stage}")
+            return str(latest_version)
+        else:
+            logger.warning(f"No model versions found for {MODEL_NAME}")
     except Exception as e:
-        logger.warning(f"Failed to archive previous production model: {e}")
+        logger.error(f"Error registering model version: {e}")
+    
+    return None
 
 
 @click.command()
 @click.option("--model-type", default="random_forest", help="Model type (random_forest, gradient_boosting)")
 @click.option("--n-estimators", default=100, help="Number of estimators")
-@click.option("--max-depth", default=10, help="Maximum tree depth")
-@click.option("--register", is_flag=True, help="Register model in MLflow registry")
-@click.option("--stage", default="Production", help="Target stage for registration")
-def main(model_type: str, n_estimators: int, max_depth: int, register: bool, stage: str):
-    """Train model and optionally register in MLflow."""
+@click.option("--max-depth", default=None, help="Max depth of trees")
+@click.option("--data-path", default="training/data.csv", help="Path to training data")
+@click.option("--register", is_flag=True, help="Register model in MLflow")
+@click.option("--stage", default="Production", help="Model stage (Production, Staging)")
+def main(
+    model_type: str,
+    n_estimators: int,
+    max_depth: Optional[int],
+    data_path: str,
+    register: bool,
+    stage: str,
+):
+    """Main training pipeline."""
     logger.info("Starting model training pipeline")
     logger.info(f"Configuration: model_type={model_type}, n_estimators={n_estimators}, max_depth={max_depth}")
     
     # Load data
-    X, y = load_data(DATA_PATH)
+    X, y = load_data(data_path)
+    logger.info(f"Generated synthetic data: {len(X)} samples")
     
     # Split data
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X, y, test_size=0.2, random_state=42
     )
-    
     logger.info(f"Train size: {len(X_train)}, Test size: {len(X_test)}")
     
-    # Prepare hyperparameters
-    hyperparams = {
-        "n_estimators": n_estimators,
-        "max_depth": max_depth,
-    }
-    
     # Train model
-    model = train_model(X_train, y_train, model_type, hyperparams)
+    model = train_model(X_train, y_train, model_type, n_estimators, max_depth)
     
     # Evaluate
     metrics = evaluate_model(model, X_test, y_test)
     
-    # Log to MLflow
-    run_id = log_to_mlflow(
-        model,
-        metrics,
-        X_train,
-        model_type,
-        tags={"environment": os.getenv("ENV", "development")},
-    )
-    
-    # Register if requested
+    # Log to MLflow if requested
     if register:
-        archive_previous_production()
-        version = register_model_version(stage)
+        run_id = log_to_mlflow(
+            model,
+            metrics,
+            X_train,
+            input_example=X_train.head(),
+        )
+        logger.info(f"Run ID: {run_id}")
         
+        # Register version
+        version = register_model_version(stage)
         if version:
-            logger.info(f"Model registered as version {version} in stage {stage}")
-        else:
-            logger.warning("Model not registered - no versions available")
+            logger.info(f"Model registered as version {version} in {stage}")
     
     # Save model locally
-    os.makedirs("training", exist_ok=True)
-    joblib.dump(model, "training/model.pkl")
-    logger.info("Model saved to training/model.pkl")
-    
-    # Print summary
-    print("\n" + "=" * 50)
-    print("TRAINING SUMMARY")
-    print("=" * 50)
-    print(f"Model Type: {model_type}")
-    print(f"Run ID: {run_id}")
-    print(f"MLflow Tracking URI: {MLFLOW_TRACKING_URI}")
-    print(f"Metrics:")
-    for key, value in metrics.items():
-        print(f"  - {key}: {value:.4f}")
-    print("=" * 50)
+    model_path = f"models/{model_type}_model.pkl"
+    os.makedirs("models", exist_ok=True)
+    joblib.dump(model, model_path)
+    logger.info(f"Model saved to {model_path}")
 
 
 if __name__ == "__main__":
