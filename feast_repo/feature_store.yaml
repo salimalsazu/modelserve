@@ -3,7 +3,7 @@
 
 project: modelserve
 registry: data/registry.db
-provider: aws
+provider: local
 
 # Offline store configuration (for training)
 offline_store:
