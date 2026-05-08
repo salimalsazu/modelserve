@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile for ModelServe
-# Stage 1: Builder - Install dependencies
+# Stage 1: Builder - Install dependencies        
 FROM python:3.10-slim as builder
 
 WORKDIR /app
@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install dependencies
+# Copy requirements and install dependencies     
 COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
@@ -25,22 +25,26 @@ RUN groupadd -r appgroup && \
 # Copy installed packages from builder
 COPY --from=builder /root/.local /home/appuser/.local
 
-# Copy application code
-COPY --chown=appuser:appgroup app/ ./app/
+# Copy application code (to /app directly, not nested)
+COPY --chown=appuser:appgroup app/ ./app/        
 COPY --chown=appuser:appgroup training/ ./training/
 COPY --chown=appuser:appgroup feast_repo/ ./feast_repo/
+
+# Create __init__.py files to make app a package
+RUN touch /app/app/__init__.py /app/training/__init__.py
 
 # Set Python path
 ENV PATH=/home/appuser/.local/bin:$PATH
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app
 
 # Switch to non-root user
 USER appuser
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 
 
 # Expose port
 EXPOSE 8000

@@ -1,15 +1,35 @@
+# Core dependencies
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 pydantic>=2.0.0
+
+# ML dependencies
 numpy>=1.24.0
 scikit-learn>=1.3.0
 joblib>=1.3.0
 pandas>=2.0.0
 mlflow>=2.8.0
+
+# Data storage
 redis>=5.0.0
 psycopg2-binary>=2.9.0
 sqlalchemy>=2.0.0
+
+# Feature store
+feast>=0.30.0
+
+# API utilities
 python-multipart>=0.0.6
+
+# Utilities
 click>=8.0.0
 kaggle>=1.5.0
 boto3>=1.28.0
+
+# Monitoring
+prometheus-client>=0.19.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+httpx>=0.24.0

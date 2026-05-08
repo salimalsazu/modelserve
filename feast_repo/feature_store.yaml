@@ -1,14 +1,9 @@
 # Feast Feature Store Configuration for ModelServe
-# Online store: Redis | Offline store: Local filesystem (Parquet)
+# Online store: Redis | Offline store: Local filesystem
 
 project: modelserve
 registry: data/registry.db
-provider: local
-
-# Offline store configuration (for training)
-offline_store:
-  type: file
-  path: data/
+provider: aws
 
 # Online store configuration (for serving)
 online_store:
