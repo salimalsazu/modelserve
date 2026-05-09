@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile for ModelServe
-# Stage 1: Builder - Install dependencies        
+# Stage 1: Builder - Install dependencies         
 FROM python:3.10-slim as builder
 
 WORKDIR /app
@@ -34,10 +34,15 @@ COPY --chown=appuser:appgroup feast_repo/ ./feast_repo/
 RUN touch /app/app/__init__.py /app/training/__init__.py
 
 # Set Python path
-ENV PATH=/home/appuser/.local/bin:$PATH
+ENV PATH=/home/appuser/.local/bin:$PATH    
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONPATH=/app
+ENV MLFLOW_ARTIFACT_ROOT=/tmp/mlruns
+ENV MLFLOW_TRACKING_URI=http://mlflow:5000
+
+# Create mlruns directory for MLflow artifact storage (symlink to tmp)
+RUN mkdir -p /tmp/mlruns && rm -rf /app/mlruns && ln -s /tmp/mlruns /app/mlruns && chown -R appuser:appgroup /tmp/mlruns /app/mlruns
 
 # Switch to non-root user
 USER appuser

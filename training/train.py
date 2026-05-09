@@ -1,352 +1,189 @@
-"""Model training script for ModelServe.
-Trains sklearn/XGBoost model and registers it in MLflow.
-Supports Kaggle datasets, synthetic data, and local CSV files.
+"""
+Model training script for ModelServe.
+Trains sklearn model and registers it in MLflow.
 """
 
 import os
 import sys
+import json
 import logging
-from datetime import datetime
 from typing import Optional, Tuple
 
 import pandas as pd
 import numpy as np
-import mlflow
-import mlflow.sklearn
-from mlflow.tracking import MlflowClient
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_auc_score,
-    classification_report,
-    confusion_matrix,
-)
-from sklearn.preprocessing import StandardScaler
-import joblib
-import click
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+import mlflow
+from mlflow.tracking import MlflowClient
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration from environment
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT", "modelserve")
 MODEL_NAME = os.getenv("MODEL_NAME", "modelserve-model")
-DATA_PATH = os.getenv("DATA_PATH", "training/data.csv")
-MODEL_TYPE = os.getenv("MODEL_TYPE", "random_forest")
+EXPERIMENT_NAME = "model_training"
+KAGGLE_USERNAME = os.getenv("KAGGLE_USERNAME")
+KAGGLE_KEY = os.getenv("KAGGLE_KEY")
 
+# Set artifact root for MLflow (avoid /app/mlruns permissions issues)
+os.environ["MLFLOW_ARTIFACT_ROOT"] = "/tmp/mlruns"
+os.environ["MLFLOW_TRACKING_URI"] = MLFLOW_TRACKING_URI
 
-def download_kaggle_dataset(dataset: str, output_path: str = "training/data") -> str:
-    """Download dataset from Kaggle.
-    
-    Args:
-        dataset: Kaggle dataset slug (e.g., 'username/dataset-name')
-        output_path: Local path to save downloaded files
-        
-    Returns:
-        Path to downloaded CSV file
-    """
-    try:
-        import kaggle
-    except ImportError:
-        logger.error("Kaggle library not installed. Install with: pip install kaggle")
-        raise ImportError("Kaggle library not installed. Run: pip install kaggle")
-    
-    os.makedirs(output_path, exist_ok=True)
-    
-    logger.info(f"Downloading Kaggle dataset: {dataset}")
-    kaggle.api.dataset_download_files(
-        dataset,
-        path=output_path,
-        unzip=True,
-    )
-    
-    # Find the CSV file
-    csv_files = [f for f in os.listdir(output_path) if f.endswith('.csv')]
-    if csv_files:
-        csv_path = os.path.join(output_path, csv_files[0])
-        logger.info(f"Downloaded to: {csv_path}")
-        return csv_path
-    
-    raise FileNotFoundError(f"No CSV file found in downloaded dataset: {output_path}")
+def setup_kaggle_credentials():
+    if KAGGLE_USERNAME and KAGGLE_KEY:
+        kaggle_dir = "/tmp/kaggle"
+        os.makedirs(kaggle_dir, exist_ok=True)
+        with open(os.path.join(kaggle_dir, "kaggle.json"), "w") as f:
+            json.dump({"username": KAGGLE_USERNAME, "key": KAGGLE_KEY}, f)
+        os.chmod(os.path.join(kaggle_dir, "kaggle.json"), 0o600)
+        os.environ["KAGGLE_CONFIG_DIR"] = kaggle_dir
+        logger.info("Kaggle credentials configured")
+        return True
+    return False
 
+def download_kaggle_dataset(dataset: str, path: str) -> str:
+    from kaggle.api.kaggle_api_extended import KaggleApi
+    api = KaggleApi()
+    api.authenticate()
+    os.makedirs(path, exist_ok=True)
+    api.dataset_download_files(dataset, path=path, unzip=True)
+    logger.info(f"Downloaded Kaggle dataset: {dataset}")
+    for f in os.listdir(path):
+        if f.endswith('.csv'):
+            return os.path.join(path, f)
+    raise FileNotFoundError(f"No CSV in {path}")
 
-def load_data(path: str, kaggle_dataset: Optional[str] = None) -> Tuple[pd.DataFrame, pd.Series]:
-    """Load training data from CSV, Kaggle, or generate synthetic.
-    
-    Args:
-        path: Local CSV file path
-        kaggle_dataset: Kaggle dataset slug to download (e.g., 'user/dataset')
-        
-    Returns:
-        Tuple of (features DataFrame, target Series)
-    """
-    # If Kaggle dataset specified, download it
-    if kaggle_dataset:
-        csv_path = download_kaggle_dataset(kaggle_dataset, "training/kaggle_data")
-        
-        # Load and prepare Kaggle dataset
-        df = pd.read_csv(csv_path)
-        logger.info(f"Loaded Kaggle dataset: {df.shape}")
-        
-        # Try to auto-detect target column
-        if 'target' in df.columns:
-            X = df.drop("target", axis=1)
-            y = df["target"]
-        elif 'label' in df.columns:
-            X = df.drop("label", axis=1)
-            y = df["label"]
-        elif 'y' in df.columns:
-            X = df.drop("y", axis=1)
-            y = df["y"]
-        elif 'class' in df.columns:
-            X = df.drop("class", axis=1)
-            y = df["class"]
-        else:
-            # Use last column as target
-            target_col = df.columns[-1]
-            X = df.drop(target_col, axis=1)
-            y = df[target_col]
-        
-        # Convert target to binary if needed
-        if y.dtype == 'object' or y.nunique() > 2:
-            # Encode target
-            from sklearn.preprocessing import LabelEncoder
-            le = LabelEncoder()
-            y = pd.Series(le.fit_transform(y))
-        
-        return X, y
-    
-    # Load from local path if exists
-    if os.path.exists(path):
-        logger.info(f"Loading data from {path}")
-        df = pd.read_csv(path)
-        
-        if 'target' in df.columns:
-            X = df.drop("target", axis=1)
-            y = df["target"]
-        else:
-            X = df.iloc[:, :-1]
-            y = df.iloc[:, -1]
-        
-        return X, y
-    
-    logger.warning(f"Data file not found: {path}. Generating synthetic data.")
+def prepare_data(csv_path: str) -> Tuple[pd.DataFrame, pd.Series, list]:
+    df = pd.read_csv(csv_path)
+    target_col = None
+    for col in ['Class', 'target', 'fraud', 'label']:
+        if col in df.columns:
+            target_col = col
+            break
+    if target_col is None:
+        target_col = df.columns[-1]
+    y = df[target_col]
+    X = df.drop(columns=[target_col])
+    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    X = X[numeric_cols]
+    return X, y, numeric_cols
+
+def create_synthetic_data(n_samples: int = 10000) -> Tuple[pd.DataFrame, pd.Series, list]:
     np.random.seed(42)
-    n_samples = 1000
-    n_features = 10
-    X = pd.DataFrame(
-        np.random.rand(n_samples, n_features),
-        columns=[f"feature_{i}" for i in range(n_features)]
-    )
-    y = pd.Series(np.random.randint(0, 2, n_samples))
-    return X, y
-
-
-def train_model(
-    X_train: pd.DataFrame,
-    y_train: pd.Series,
-    model_type: str = "random_forest",
-    n_estimators: int = 100,
-    max_depth: Optional[int] = None,
-) -> RandomForestClassifier:
-    """Train a sklearn model."""
-    logger.info(f"Training {model_type} model")
+    n_fraud = int(n_samples * 0.002)
+    feature_cols = [f'V{i}' for i in range(1, 29)] + ['Amount']
     
-    if model_type == "random_forest":
-        model = RandomForestClassifier(
-            n_estimators=n_estimators,
-            max_depth=max_depth or 10,
-            random_state=42,
-            n_jobs=-1,
-        )
-    elif model_type == "gradient_boosting":
-        model = GradientBoostingClassifier(
-            n_estimators=n_estimators,
-            max_depth=max_depth or 5,
-            random_state=42,
-        )
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
+    normal = pd.DataFrame({col: np.random.rand(n_samples - n_fraud) for col in feature_cols})
+    normal['Class'] = 0
     
+    fraud = pd.DataFrame({
+        col: np.random.randn(n_fraud) * 2 + 1 if col.startswith('V') else np.random.exponential(500, n_fraud)
+        for col in feature_cols
+    })
+    fraud['Class'] = 1
+    
+    df = pd.concat([normal, fraud], ignore_index=True).sample(frac=1, random_state=42).reset_index(drop=True)
+    X = df.drop(columns=['Class'])
+    y = df['Class']
+    return X, y, feature_cols
+
+def train_model(X_train, X_test, y_train, y_test, model_type: str):
+    from sklearn.ensemble import RandomForestClassifier
+    
+    params = {'n_estimators': 100, 'max_depth': 10, 'min_samples_split': 5, 'random_state': 42, 'n_jobs': -1}
+    model = RandomForestClassifier(**params)
     model.fit(X_train, y_train)
-    logger.info(f"Model training complete: {model.__class__.__name__}")
-    return model
-
-
-def evaluate_model(
-    model,
-    X_test: pd.DataFrame,
-    y_test: pd.Series,
-) -> dict:
-    """Evaluate model and return metrics."""
+    
     y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
     
     metrics = {
-        "accuracy": accuracy_score(y_test, y_pred),
-        "precision": precision_score(y_test, y_pred, average="weighted"),
-        "recall": recall_score(y_test, y_pred, average="weighted"),
-        "f1": f1_score(y_test, y_pred, average="weighted"),
-        "roc_auc": roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]),
+        'accuracy': accuracy_score(y_test, y_pred),
+        'precision': precision_score(y_test, y_pred, zero_division=0),
+        'recall': recall_score(y_test, y_pred, zero_division=0),
+        'f1': f1_score(y_test, y_pred, zero_division=0),
+        'roc_auc': roc_auc_score(y_test, y_proba) if len(np.unique(y_test)) > 1 else 0.5
     }
-    
-    # Cross-validation
-    cv_scores = cross_val_score(model, X_test, y_test, cv=5)
-    metrics["cv_mean"] = cv_scores.mean()
-    metrics["cv_std"] = cv_scores.std()
-    
-    logger.info(f"Metrics: {metrics}")
-    return metrics
+    return model, params, metrics
 
-
-def log_to_mlflow(
-    model,
-    metrics: dict,
-    X_train: pd.DataFrame,
-    input_example,
-) -> str:
-    """Log model, metrics, and artifacts to MLflow."""
-    import warnings
-    # Suppress deprecation warning for artifact_path
-    warnings.filterwarnings("ignore", category=FutureWarning)
-    
-    # Set up MLflow tracking
+def log_to_mlflow(model, X_train, metrics, model_type, params, register: bool):
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(EXPERIMENT_NAME)
     
     with mlflow.start_run() as run:
         run_id = run.info.run_id
-        logger.info(f"MLflow run ID: {run_id}")
-        
-        # Log parameters
-        mlflow.log_params({
-            "model_type": MODEL_TYPE,
-            "n_features": X_train.shape[1],
-            "n_samples": X_train.shape[0],
-        })
-        
-        # Log metrics
+        mlflow.log_param("model_type", model_type)
+        mlflow.log_params(params)
         mlflow.log_metrics(metrics)
         
-        # Log model using artifact_path (deprecated but compatible)
-        artifact_path = "model"
-        mlflow.sklearn.log_model(
-            model,
-            artifact_path,
-            registered_model_name=MODEL_NAME,
-        )
+        from mlflow.models import infer_signature
+        signature = infer_signature(X_train.head(), model.predict(X_train.head()))
         
-        # Log feature importance if available
-        if hasattr(model, "feature_importances_"):
-            importance = pd.DataFrame({
-                "feature": X_train.columns,
-                "importance": model.feature_importances_,
-            }).sort_values("importance", ascending=False)
-            importance_path = "feature_importance.csv"
-            importance.to_csv(importance_path, index=False)
-            mlflow.log_artifact(importance_path)
+        # Log model WITHOUT registration (older API compatible)
+        mlflow.sklearn.log_model(model, "model", signature=signature)
         
-        logger.info(f"Model logged to MLflow with registered name: {MODEL_NAME}")
-    
+        logger.info(f"MLflow run ID: {run_id}")
     return run_id
 
-
 def register_model_version(stage: str = "Production") -> Optional[str]:
-    """Register a model version and transition to stage."""
     client = MlflowClient()
-    
     try:
-        # Get all versions of the model
-        versions = client.get_latest_versions(MODEL_NAME, stages=["None", "Staging", "Production"])
-        if versions:
-            latest_version = versions[0].version
-            logger.info(f"Latest model version: {latest_version}")
-            
-            # Transition to stage
-            client.transition_model_version_stage(
-                MODEL_NAME,
-                latest_version,
-                stage,
-            )
-            logger.info(f"Model version {latest_version} transitioned to {stage}")
-            return str(latest_version)
-        else:
-            logger.warning(f"No model versions found for {MODEL_NAME}")
+        try:
+            client.create_registered_model(MODEL_NAME)
+            logger.info(f"Created registered model: {MODEL_NAME}")
+        except mlflow.exceptions.MlflowException:
+            pass  # Already exists
+        
+        experiment = client.get_experiment_by_name(EXPERIMENT_NAME)
+        if experiment:
+            runs = client.search_runs(experiment.experiment_id, max_results=1, order_by=["start_time DESC"])
+            if runs:
+                run_id = runs[0].info.run_id
+                model_uri = f"runs:/{run_id}/model"
+                result = client.create_model_version(name=MODEL_NAME, source=model_uri, run_id=run_id)
+                version = result.version
+                logger.info(f"Registered model version: {version}")
+                if stage:
+                    client.transition_model_version_stage(MODEL_NAME, version, stage)
+                return str(version)
     except Exception as e:
-        logger.error(f"Error registering model version: {e}")
-    
+        logger.error(f"Error registering model: {e}")
+        import traceback
+        traceback.print_exc()
     return None
 
-
-@click.command()
-@click.option("--model-type", default="random_forest", help="Model type (random_forest, gradient_boosting)")
-@click.option("--n-estimators", default=100, help="Number of estimators")
-@click.option("--max-depth", default=None, help="Max depth of trees")
-@click.option("--data-path", default="training/data.csv", help="Path to training data")
-@click.option("--kaggle-dataset", default=None, help="Kaggle dataset slug (e.g., 'username/dataset-name')")
-@click.option("--register", is_flag=True, help="Register model in MLflow")
-@click.option("--stage", default="Production", help="Model stage (Production, Staging)")
-def main(
-    model_type: str,
-    n_estimators: int,
-    max_depth: Optional[int],
-    data_path: str,
-    kaggle_dataset: Optional[str],
-    register: bool,
-    stage: str,
-):
-    """Main training pipeline."""
-    logger.info("Starting model training pipeline")
-    logger.info(f"Configuration: model_type={model_type}, n_estimators={n_estimators}, max_depth={max_depth}")
-    
-    # Load data (from Kaggle, local file, or synthetic)
-    X, y = load_data(data_path, kaggle_dataset)
-    
-    if kaggle_dataset:
-        logger.info(f"Loaded Kaggle dataset: {len(X)} samples, {X.shape[1]} features")
-    else:
-        logger.info(f"Data loaded: {len(X)} samples")
-    
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-    logger.info(f"Train size: {len(X_train)}, Test size: {len(X_test)}")
-    
-    # Train model
-    model = train_model(X_train, y_train, model_type, n_estimators, max_depth)
-    
-    # Evaluate
-    metrics = evaluate_model(model, X_test, y_test)
-    
-    # Log to MLflow if requested
-    if register:
-        run_id = log_to_mlflow(
-            model,
-            metrics,
-            X_train,
-            input_example=X_train.head(),
-        )
-        logger.info(f"Run ID: {run_id}")
-        
-        # Register version
-        version = register_model_version(stage)
-        if version:
-            logger.info(f"Model registered as version {version} in {stage}")
-    
-    # Save model locally
-    model_path = f"models/{model_type}_model.pkl"
-    os.makedirs("models", exist_ok=True)
-    joblib.dump(model, model_path)
-    logger.info(f"Model saved to {model_path}")
-
-
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--kaggle-dataset", type=str)
+    parser.add_argument("--data-path", type=str)
+    parser.add_argument("--model-type", type=str, default="random_forest")
+    parser.add_argument("--register", action="store_true")
+    parser.add_argument("--stage", type=str, default="Production")
+    args = parser.parse_args()
+    
+    if args.kaggle_dataset:
+        setup_kaggle_credentials()
+        csv_path = download_kaggle_dataset(args.kaggle_dataset, "/tmp/kaggle_data")
+        X, y, _ = prepare_data(csv_path)
+    elif args.data_path:
+        X, y, _ = prepare_data(args.data_path)
+    else:
+        logger.info("Using synthetic data")
+        X, y, _ = create_synthetic_data()
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    logger.info(f"Training: {X_train.shape}, Test: {X_test.shape}")
+    
+    model, params, metrics = train_model(X_train, X_test, y_train, y_test, args.model_type)
+    logger.info(f"Metrics: {metrics}")
+    
+    run_id = log_to_mlflow(model, X_train, metrics, args.model_type, params, args.register)
+    
+    if args.register:
+        version = register_model_version(args.stage)
+        if version:
+            logger.info(f"Model registered as version {version}")
+    
+    print(f"\nTraining complete! Run ID: {run_id}")

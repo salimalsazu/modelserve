@@ -42,6 +42,8 @@ services:
       - "5000:5000"
     environment:
       - MLFLOW_TRACKING_URI=http://localhost:5000
+      - KAGGLE_USERNAME=${KAGGLE_USERNAME:-}
+      - KAGGLE_KEY=${KAGGLE_KEY:-}
     volumes:
       - mlflow_data:/app/mlruns
     depends_on:
@@ -50,25 +52,25 @@ services:
     networks:
       - modelserve
     restart: unless-stopped
-    command: mlflow server --backend-store-uri postgresql://mlflow:mlflow@modelserve-postgres:5432/mlflow --default-artifact-root /app/mlruns --host 0.0.0.0 --port 5000 --workers 2
+    command: mlflow server --backend-store-uri postgresql://mlflow:mlflow@postgres:5432/mlflow --default-artifact-root /app/mlruns --host 0.0.0.0 --port 5000 --workers 2
 
   # PostgreSQL for MLflow
   postgres:
     image: postgres:15-alpine
     container_name: modelserve-postgres
-    networks:
-      - modelserve
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-mlflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mlflow}
-      POSTGRES_DB: ${POSTGRES_DB:-mlflow}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
     ports:
       - "5432:5432"
+    environment:
+      - POSTGRES_USER=mlflow
+      - POSTGRES_PASSWORD=mlflow
+      - POSTGRES_DB=mlflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - modelserve
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mlflow} -d ${POSTGRES_DB:-mlflow}"]
+      test: ["CMD-SHELL", "pg_isready -U mlflow"]
       interval: 10s
       timeout: 5s
       retries: 5
