@@ -91,7 +91,15 @@ def create_synthetic_data(n_samples: int = 10000) -> Tuple[pd.DataFrame, pd.Seri
 def train_model(X_train, X_test, y_train, y_test, model_type: str):
     from sklearn.ensemble import RandomForestClassifier
     
-    params = {'n_estimators': 100, 'max_depth': 10, 'min_samples_split': 5, 'random_state': 42, 'n_jobs': -1}
+    # Smaller model: 50 trees instead of 100, limited depth
+    params = {
+        'n_estimators': 50,      # Reduced from 100
+        'max_depth': 8,           # Limited depth
+        'min_samples_split': 10,   # More regularization
+        'min_samples_leaf': 5,    # Prevent overfitting
+        'random_state': 42,
+        'n_jobs': -1
+    }
     model = RandomForestClassifier(**params)
     model.fit(X_train, y_train)
     
@@ -187,3 +195,24 @@ if __name__ == "__main__":
             logger.info(f"Model registered as version {version}")
     
     print(f"\nTraining complete! Run ID: {run_id}")
+    
+    # Save model locally as PKL with version number
+    import joblib
+    import glob
+    
+    os.makedirs("/tmp/models", exist_ok=True)
+    
+    # Find the latest version number
+    existing_models = glob.glob("/tmp/models/fraud_model_v*.pkl")
+    if existing_models:
+        versions = [int(f.split("v")[-1].split(".")[0]) for f in existing_models]
+        next_version = max(versions) + 1
+    else:
+        next_version = 1
+    
+    # Save with new version
+    pkl_path = f"/tmp/models/fraud_model_v{next_version}.pkl"
+    joblib.dump(model, pkl_path)
+    size_mb = os.path.getsize(pkl_path) / (1024 * 1024)
+    print(f"Model saved to: {pkl_path}")
+    print(f"Model size: {size_mb:.2f} MB")

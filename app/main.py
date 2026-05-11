@@ -14,6 +14,7 @@ import mlflow
 from mlflow.tracking import MlflowClient
 import joblib
 import numpy as np
+import pandas as pd
 from datetime import datetime
 import logging
 
@@ -87,7 +88,7 @@ app = FastAPI(
 
 class PredictRequest(BaseModel):
     entity_id: int = Field(..., description="Unique entity identifier")
-    features: List[float] = Field(..., description="Feature vector for prediction")
+    features: List[float] = Field(..., description="Feature vector for prediction (V1-V28 + Amount)")
     feature_names: Optional[List[str]] = Field(None, description="Optional feature names")
 
 
@@ -159,17 +160,18 @@ def predict(data: PredictRequest):
     
     try:
         with prediction_latency.labels(endpoint=endpoint, model_stage=stage).time():
-            # Prepare features
-            features = np.array(data.features).reshape(1, -1)
+            # Create DataFrame with correct feature names for MLflow model
+            feature_columns = [f"V{i}" for i in range(1, 29)] + ["Amount"]
+            features_df = pd.DataFrame([data.features], columns=feature_columns)
             
             # Get prediction
-            prediction = model.predict(features)
+            prediction = model.predict(features_df)
             
             # Get probability if available
             probability = None
             if hasattr(model, "predict_proba"):
                 try:
-                    proba = model.predict_proba(features)
+                    proba = model.predict_proba(features_df)
                     probability = float(proba[0][1])  # Class 1 probability
                 except Exception:
                     pass

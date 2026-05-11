@@ -6,6 +6,7 @@ Supports loading models from MLflow model registry with fallback to local models
 import os
 import logging
 from typing import Optional, Dict, Any
+import numpy as np
 import mlflow
 from mlflow.tracking import MlflowClient
 import joblib
@@ -33,42 +34,57 @@ def get_model_uri(stage: Optional[str] = None) -> str:
 
 def load_model(stage: Optional[str] = None) -> Any:
     """
-    Load model from MLflow registry.
+    Load model from MLflow registry with predict_proba support.
     
     Args:
         stage: Model stage (Production, Staging, None for latest)
     
     Returns:
-        Loaded model object
-    
-    Raises:
-        Exception: If model loading fails
+        Loaded model object with predict and predict_proba support
     """
-    try:
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        model_uri = get_model_uri(stage)
-        
-        logger.info(f"Loading model from: {model_uri}")
-        model = mlflow.pyfunc.load_model(model_uri)
-        
-        logger.info("Model loaded successfully from MLflow registry")
-        return model
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    model_uri = get_model_uri(stage)
     
-    except Exception as e:
-        logger.warning(f"Failed to load from MLflow registry: {e}")
+    logger.info(f"Loading model from: {model_uri}")
+    model = mlflow.pyfunc.load_model(model_uri)
+    
+    # Wrap the pyfunc model to add predict_proba support
+    class PyFuncWrapper:
+        def __init__(self, pyfunc_model):
+            self._model = pyfunc_model
+            self._sklearn_model = None
+            # Try to get underlying sklearn model
+            try:
+                impl = pyfunc_model._model_impl
+                if hasattr(impl, 'model'):
+                    self._sklearn_model = impl.model
+            except Exception:
+                pass
         
-        # Try loading the latest version
-        try:
-            model_uri = f"models:/{MODEL_NAME}/latest"
-            logger.info(f"Trying latest version: {model_uri}")
-            model = mlflow.pyfunc.load_model(model_uri)
-            logger.info("Loaded latest model version")
-            return model
-        except Exception:
-            pass
+        def predict(self, X):
+            return self._model.predict(X)
         
-        # Fallback to local model
-        return load_local_model()
+        def predict_proba(self, X):
+            if self._sklearn_model and hasattr(self._sklearn_model, 'predict_proba'):
+                return self._sklearn_model.predict_proba(X)
+            # Fallback: predict and convert to probabilities
+            pred = self._model.predict(X)
+            # Handle DataFrame input
+            if hasattr(X, 'values'):
+                n = len(X.values) if len(X.values.shape) > 1 else len(X)
+            else:
+                n = len(X) if hasattr(X, '__len__') else 1
+            proba = np.zeros((n, 2))
+            for i, p in enumerate(pred.flatten() if hasattr(pred, 'flatten') else [pred]):
+                proba[i, 1] = float(p)
+                proba[i, 0] = 1.0 - float(p)
+            return proba
+        
+        def __getattr__(self, name):
+            return getattr(self._model, name)
+    
+    logger.info("Model loaded successfully from MLflow registry")
+    return PyFuncWrapper(model)
 
 
 def load_local_model(path: Optional[str] = None) -> Any:
