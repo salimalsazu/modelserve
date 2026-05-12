@@ -24,6 +24,8 @@ services:
       - redis
     networks:
       - modelserve
+    volumes:
+      - ./models:/tmp/models
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
