@@ -15,6 +15,8 @@ services:
     environment:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - MODEL_NAME=modelserve-model
+      - LOCAL_MODEL_PATH=/app/models/model.pkl
+      - FEAST_FEATURE_SERVER_URL=http://feature-server:8888
       - MODEL_STAGE=Production
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -25,7 +27,8 @@ services:
     networks:
       - modelserve
     volumes:
-      - ./models:/tmp/models
+      - ./models:/app/models
+      - feast-data:/home/appuser/.cache/feast
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
