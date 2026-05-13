@@ -43,7 +43,7 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - mlflow-data:/mlflow
+      - mlflow_data:/mlflow
     environment:
       - MLFLOW_TRACKING_INSECURE_USE_HTTP=true
       - MLFLOW_TRACKING_USERNAME=admin
