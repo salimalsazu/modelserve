@@ -1,0 +1,2 @@
+#!/bin/bash
+aws ec2 run-instances --image-id ami-064ac0bc94e195394 --count 1 --instance-type t3.medium --subnet-id subnet-0724f1ed192592b2d --security-group-ids sg-0978f826a3b556aff --region ap-southeast-1 --output json

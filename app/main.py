@@ -17,8 +17,9 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import logging
+import os
 
-from app.model_loader import load_model, get_model_info
+from app.model_loader import load_model, get_model_info, load_local_model
 from app.feature_client import FeatureStoreClient
 from app.metrics import (
     prediction_requests,
@@ -47,13 +48,21 @@ async def lifespan(app: FastAPI):
     # Initialize MLflow client
     mlflow_client = MlflowClient()
     
-    # Load model from MLflow registry
+    # Load model from MLflow registry with local fallback
     try:
         model = load_model()
-        logger.info("Model loaded successfully")
+        logger.info("Model loaded successfully from MLflow")
     except Exception as e:
-        logger.warning(f"Model loading failed: {e}. Using fallback.")
-        model = None
+        logger.warning(f"MLflow model loading failed: {e}. Trying local model...")
+        local_model_path = os.getenv("LOCAL_MODEL_PATH", "training/model.pkl")
+        model = load_local_model(local_model_path)
+        if model:
+            logger.info("Model loaded from local path successfully")
+        else:
+            logger.error("Both MLflow and local model loading failed")
+
+    if model is None:
+        logger.error("No model available - predictions will fail")
     
     # Initialize feature store client
     try:

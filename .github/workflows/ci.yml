@@ -7,9 +7,10 @@ on:
     branches: [main]
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/modelserve
-  ENVIRONMENT: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "679835924810"
+  ECR_REPOSITORY: modelserve-${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+  REGISTRY: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
 
 jobs:
   # ============================================
@@ -30,43 +31,110 @@ jobs:
         continue-on-error: true
 
   # ============================================
+  # Provision Infrastructure (Pulumi)
+  # ============================================
+  provision:
+    name: Provision Infrastructure
+    runs-on: self-hosted
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Pulumi
+        run: |
+          curl -fsSL https://get.pulumi.com | sh
+          echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          cd infrastructure
+          pip install -r requirements.txt
+
+      - name: Login to Pulumi
+        run: |
+          pulumi login ${{ secrets.PULUMI_ACCESS_TOKEN }}
+
+      - name: Select or create stack
+        run: |
+          cd infrastructure
+          STACK_NAME=${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          pulumi stack select $STACK_NAME || pulumi stack init $STACK_NAME
+          pulumi config set aws:region ${{ env.AWS_REGION }}
+          pulumi config set environment ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+
+      - name: Preview infrastructure
+        run: |
+          cd infrastructure
+          pulumi preview --stack ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+
+      - name: Apply infrastructure
+        if: github.event_name == 'push'
+        run: |
+          cd infrastructure
+          pulumi up --stack ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }} --yes --non-interactive
+
+      - name: Get EC2 IP
+        if: github.event_name == 'push'
+        id: ec2-info
+        run: |
+          INSTANCE_IP=$(cd infrastructure && pulumi stack output ec2_public_ip)
+          echo "EC2_IP=$INSTANCE_IP" >> $GITHUB_OUTPUT
+          echo "EC2_IP=$INSTANCE_IP" >> $GITHUB_ENV
+          echo "::notice::EC2 Public IP: $INSTANCE_IP"
+
+  # ============================================
   # Build and Push Docker Image
   # ============================================
   build:
     name: Build and Push
     runs-on: self-hosted
-    needs: test
+    needs: [test, provision]
     if: github.event_name == 'push'
-    permissions:
-      contents: read
-      packages: write
 
     outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
+      image-tag: ${{ steps.meta.outputs.version }}
+      ec2_ip: ${{ needs.provision.outputs.ec2_ip }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GH Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
           tags: |
-            type=sha,prefix=,suffix=
+            type=sha,prefix=
             type=ref,event=branch
-            type=semver,pattern={{version}}
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -81,39 +149,104 @@ jobs:
         run: echo "Image built: ${{ steps.meta.outputs.tags }}"
 
   # ============================================
-  # Deploy to Server
+  # Deploy to EC2
   # ============================================
   deploy:
-    name: Deploy to ${{ env.ENVIRONMENT }}
+    name: Deploy to ${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}
     runs-on: self-hosted
     needs: build
     environment:
-      name: ${{ env.ENVIRONMENT }}
+      name: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Log in to GH Container Registry
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Pull latest image
-        run: |
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} modelserve:latest
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Deploy with Docker Compose
+      - name: Get EC2 Instance IP
+        id: get-ec2
         run: |
-          docker compose down || true
-          docker compose up -d
-          
-      - name: Wait for health check
+          INSTANCE_IP=$(cd infrastructure && pulumi stack output ec2_public_ip 2>/dev/null || echo "")
+          if [ -z "$INSTANCE_IP" ]; then
+            INSTANCE_IP="${{ vars.PROD_EC2_HOST }}"
+          fi
+          echo "EC2_IP=$INSTANCE_IP" >> $GITHUB_OUTPUT
+          echo "EC2_IP=$INSTANCE_IP" >> $GITHUB_ENV
+          echo "Deploying to EC2 at: $INSTANCE_IP"
+
+      - name: Wait for EC2 to be ready
+        run: sleep 60
+
+      - name: Setup SSH key
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > ec2_key.pem
+          chmod 600 ec2_key.pem
+
+      - name: Check EC2 connectivity
+        run: |
+          ssh -o ConnectTimeout=30 -o StrictHostKeyChecking=no -i ec2_key.pem ec2-user@${{ env.EC2_IP }} echo "EC2 Connected successfully"
+
+      - name: Deploy to EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ec2-user@${{ env.EC2_IP }} << 'REMOTE'
+            # Install Docker if needed
+            sudo yum update -y
+            sudo yum install -y docker
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            sudo usermod -aG docker ec2-user
+            
+            # Configure Docker for ECR
+            export REGISTRY=${{ env.REGISTRY }}
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin $REGISTRY
+            
+            # Stop existing container
+            docker stop modelserve 2>/dev/null || true
+            docker rm modelserve 2>/dev/null || true
+            
+            # Pull and run new image
+            docker pull $REGISTRY/${{ env.ECR_REPOSITORY }}:sha-${{ github.sha }}
+            docker run -d --name modelserve \
+              -p 8000:8000 \
+              -p 5000:5000 \
+              -p 9090:9090 \
+              -p 3000:3000 \
+              -e MLFLOW_TRACKING_URI=http://localhost:5000 \
+              -e AWS_DEFAULT_REGION=${{ env.AWS_REGION }} \
+              --restart unless-stopped \
+              $REGISTRY/${{ env.ECR_REPOSITORY }}:sha-${{ github.sha }}
+          REMOTE
+
+      - name: Cleanup SSH key
+        run: rm -f ec2_key.pem
+
+      - name: Wait for containers to start
         run: sleep 30
 
       - name: Verify deployment
         run: |
-          curl -f http://localhost:8000/health && echo "Deployment successful!"
+          echo "${{ secrets.EC2_SSH_KEY }}" > ec2_key.pem
+          chmod 600 ec2_key.pem
+          ssh -o StrictHostKeyChecking=no -i ec2_key.pem ec2-user@${{ env.EC2_IP }} \
+            "curl -f http://localhost:8000/health && echo 'API Health OK' && curl -f http://localhost:5000/health && echo 'MLflow Health OK'"
+          rm -f ec2_key.pem
+
+      - name: Deployment Summary
+        run: |
+          echo "## Deployment Complete! 🎉" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | URL |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| API | http://${{ env.EC2_IP }}:8000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| MLflow | http://${{ env.EC2_IP }}:5000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Prometheus | http://${{ env.EC2_IP }}:9090 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana | http://${{ env.EC2_IP }}:3000 |" >> $GITHUB_STEP_SUMMARY
