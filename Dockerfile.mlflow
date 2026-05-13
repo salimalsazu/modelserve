@@ -10,4 +10,10 @@ RUN pip install --no-cache-dir \
     gunicorn \
     boto3
 
-# Default command is already set in the base image
+# Expose MLflow port
+EXPOSE 5000
+
+# Run MLflow server with host 0.0.0.0 and disable security
+ENV MLFLOW_TRACKING_INSECURE_USE_HTTP=true
+
+CMD ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "sqlite:///mlflow.db", "--serve-artifacts"]

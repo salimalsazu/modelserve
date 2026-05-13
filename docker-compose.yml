@@ -42,19 +42,19 @@ services:
     container_name: modelserve-mlflow
     ports:
       - "5000:5000"
-    environment:
-      - MLFLOW_TRACKING_URI=http://localhost:5000
-      - KAGGLE_USERNAME=${KAGGLE_USERNAME:-}
-      - KAGGLE_KEY=${KAGGLE_KEY:-}
     volumes:
-      - mlflow_data:/app/mlruns
+      - mlflow-data:/mlflow
+    environment:
+      - MLFLOW_TRACKING_INSECURE_USE_HTTP=true
+      - MLFLOW_TRACKING_USERNAME=admin
+      - MLFLOW_TRACKING_PASSWORD=admin123
+    command: ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "sqlite:///mlflow.db", "--serve-artifacts", "--workers", "2"]
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - modelserve
     restart: unless-stopped
-    command: mlflow server --backend-store-uri postgresql://mlflow:mlflow@postgres:5432/mlflow --default-artifact-root /app/mlruns --host 0.0.0.0 --port 5000 --workers 2
 
   # PostgreSQL for MLflow
   postgres:
