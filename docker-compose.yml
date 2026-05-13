@@ -28,7 +28,7 @@ services:
       - modelserve
     volumes:
       - ./models:/app/models
-      - feast-data:/home/appuser/.cache/feast
+      - feast_data:/home/appuser/.cache/feast
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
