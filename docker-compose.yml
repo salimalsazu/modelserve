@@ -48,7 +48,7 @@ services:
       - MLFLOW_TRACKING_INSECURE_USE_HTTP=true
       - MLFLOW_TRACKING_USERNAME=admin
       - MLFLOW_TRACKING_PASSWORD=admin123
-    command: ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "sqlite:///mlflow.db", "--serve-artifacts", "--workers", "2"]
+    command: ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "sqlite:///mlflow.db", "--serve-artifacts", "--workers", "2", "--allowed-hosts", "*", "--cors-allowed-origins", "*"]
     depends_on:
       postgres:
         condition: service_healthy
