@@ -36,15 +36,8 @@ jobs:
       - name: Save SSH key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ssh_key.pem
-          chmod 600 ssh_key.pem
-
-      - name: Upload SSH key to EC2
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ssh_key.pem
-          chmod 600 ssh_key.pem
-          scp -o StrictHostKeyChecking=no -i ssh_key.pem infrastructure/modelserve-key-clean.pem ec2-user@${{ env.EC2_IP }}:~/.ssh/
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/modelserve-key-clean.pem
+          chmod 600 ~/.ssh/modelserve-key-clean.pem
 
       - name: Get EC2 Public IP
         id: ec2-ip
@@ -56,12 +49,11 @@ jobs:
 
       - name: Deploy to EC2
         run: |
-          scp -o StrictHostKeyChecking=no -i ssh_key.pem docker-compose.yml ec2-user@${{ env.EC2_IP }}:~/modelserve/
-          scp -o StrictHostKeyChecking=no -i ssh_key.pem Dockerfile.mlflow ec2-user@${{ env.EC2_IP }}:~/modelserve/
-          scp -o StrictHostKeyChecking=no -i ssh_key.pem app/ training/ feast_repo/ monitoring/ requirements.txt Dockerfile .env ec2-user@${{ env.EC2_IP }}:~/modelserve/
-
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/modelserve-key-clean.pem ec2-user@${{ env.EC2_IP }} 'mkdir -p ~/.ssh'
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/modelserve-key-clean.pem ~/.ssh/modelserve-key-clean.pem ec2-user@${{ env.EC2_IP }}:~/.ssh/
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/modelserve-key-clean.pem ec2-user@${{ env.EC2_IP }} << 'REMOTE'
             set -e
+            chmod 600 ~/.ssh/modelserve-key-clean.pem
             cd ~/modelserve
             aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
             docker build -f Dockerfile.mlflow -t modelserve-mlflow:latest .
@@ -86,7 +78,7 @@ jobs:
           echo "EC2 IP: $EC2_IP"
 
       - name: Cleanup
-        run: rm -f ssh_key.pem
+        run: rm -f ~/.ssh/modelserve-key-clean.pem
 
       - name: Deployment Summary
         if: always()
