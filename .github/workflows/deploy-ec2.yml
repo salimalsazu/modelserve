@@ -1,0 +1,109 @@
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REGISTRY: 679835924810.dkr.ecr.ap-southeast-1.amazonaws.com
+  ECR_REPOSITORY: modelserve
+  MLFLOW_REPOSITORY: modelserve-mlflow
+  EC2_INSTANCE_ID: i-0bef5575601488bbe
+  SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push API image to ECR
+        run: |
+          docker build -t modelserve-api:latest .
+          docker tag modelserve-api:latest ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          docker tag modelserve-api:latest ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:sha-${{ github.sha }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:sha-${{ github.sha }}
+
+      - name: Build and push MLflow image to ECR
+        run: |
+          docker build -f Dockerfile.mlflow -t modelserve-mlflow:latest .
+          docker tag modelserve-mlflow:latest ${{ env.ECR_REGISTRY }}/${{ env.MLFLOW_REPOSITORY }}:latest
+          docker tag modelserve-mlflow:latest ${{ env.ECR_REGISTRY }}/${{ env.MLFLOW_REPOSITORY }}:sha-${{ github.sha }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.MLFLOW_REPOSITORY }}:latest
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.MLFLOW_REPOSITORY }}:sha-${{ github.sha }}
+
+      - name: Save SSH key
+        run: |
+          echo "${{ env.SSH_KEY }}" > ssh_key.pem
+          chmod 600 ssh_key.pem
+
+      - name: Get EC2 Public IP
+        id: ec2-ip
+        run: |
+          EC2_IP=$(aws ec2 describe-instances --instance-ids ${{ env.EC2_INSTANCE_ID }} --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_OUTPUT
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+          echo "Deploying to EC2: $EC2_IP"
+
+      - name: Deploy to EC2
+        run: |
+          scp -o StrictHostKeyChecking=no -i ssh_key.pem docker-compose.yml ec2-user@${{ env.EC2_IP }}:~/modelserve/
+          scp -o StrictHostKeyChecking=no -i ssh_key.pem Dockerfile.mlflow ec2-user@${{ env.EC2_IP }}:~/modelserve/
+
+          ssh -o StrictHostKeyChecking=no -i ssh_key.pem ec2-user@${{ env.EC2_IP }} << 'REMOTE'
+            set -e
+            cd ~/modelserve
+            aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+            docker-compose pull
+            docker-compose up -d
+            docker-compose ps
+            echo "Deployment complete!"
+          REMOTE
+
+      - name: Health check
+        run: |
+          sleep 60
+          EC2_IP=$(aws ec2 describe-instances --instance-ids ${{ env.EC2_INSTANCE_ID }} --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          echo "Checking API health..."
+          curl -f http://$EC2_IP:8000/health || echo "API not ready"
+          echo ""
+          echo "Checking MLflow..."
+          curl -f http://$EC2_IP:5000/ || echo "MLflow not ready"
+          echo ""
+          echo "EC2 IP: $EC2_IP"
+
+      - name: Cleanup
+        run: rm -f ssh_key.pem
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          EC2_IP=$(aws ec2 describe-instances --instance-ids ${{ env.EC2_INSTANCE_ID }} --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          echo "## Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | URL |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| API | http://$EC2_IP:8000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| API Docs | http://$EC2_IP:8000/docs |" >> $GITHUB_STEP_SUMMARY
+          echo "| MLflow | http://$EC2_IP:5000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Prometheus | http://$EC2_IP:9090 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana | http://$EC2_IP:3000 |" >> $GITHUB_STEP_SUMMARY

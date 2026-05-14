@@ -1,5 +1,5 @@
 """
-ModelServe FastAPI Application
+ModelServe FastAPI Application v2
 Production-grade inference API with MLflow, Feast, and Prometheus monitoring.
 """
 
