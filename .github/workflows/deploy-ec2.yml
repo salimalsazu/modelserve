@@ -10,7 +10,8 @@ env:
   ECR_REGISTRY: 679835924810.dkr.ecr.ap-southeast-1.amazonaws.com
   ECR_REPOSITORY: modelserve
   MLFLOW_REPOSITORY: modelserve-mlflow
-  EC2_INSTANCE_ID: i-0bef5575601488bbe
+  EC2_INSTANCE_ID: i-06b88a559799162a7
+  EC2_IP: 13.250.29.11
 
 jobs:
   deploy:
