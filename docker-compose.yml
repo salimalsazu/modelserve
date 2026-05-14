@@ -6,7 +6,10 @@
 services:
   # FastAPI Application
   api:
-    image: 679835924810.dkr.ecr.ap-southeast-1.amazonaws.com/modelserve:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: 783879612848.dkr.ecr.ap-southeast-1.amazonaws.com/modelserve:latest
     container_name: modelserve-api
     ports:
       - "8000:8000"
@@ -37,7 +40,10 @@ services:
 
   # MLflow Tracking Server
   mlflow:
-    image: 679835924810.dkr.ecr.ap-southeast-1.amazonaws.com/modelserve-mlflow:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    image: 783879612848.dkr.ecr.ap-southeast-1.amazonaws.com/modelserve-mlflow:latest
     container_name: modelserve-mlflow
     ports:
       - "5000:5000"

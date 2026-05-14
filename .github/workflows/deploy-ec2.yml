@@ -39,6 +39,13 @@ jobs:
           echo "${{ secrets.EC2_SSH_KEY }}" > ssh_key.pem
           chmod 600 ssh_key.pem
 
+      - name: Upload SSH key to EC2
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ssh_key.pem
+          chmod 600 ssh_key.pem
+          scp -o StrictHostKeyChecking=no -i ssh_key.pem infrastructure/modelserve-key-clean.pem ec2-user@${{ env.EC2_IP }}:~/.ssh/
+
       - name: Get EC2 Public IP
         id: ec2-ip
         run: |
@@ -51,11 +58,18 @@ jobs:
         run: |
           scp -o StrictHostKeyChecking=no -i ssh_key.pem docker-compose.yml ec2-user@${{ env.EC2_IP }}:~/modelserve/
           scp -o StrictHostKeyChecking=no -i ssh_key.pem Dockerfile.mlflow ec2-user@${{ env.EC2_IP }}:~/modelserve/
+          scp -o StrictHostKeyChecking=no -i ssh_key.pem app/ training/ feast_repo/ monitoring/ requirements.txt Dockerfile .env ec2-user@${{ env.EC2_IP }}:~/modelserve/
 
-          ssh -o StrictHostKeyChecking=no -i ssh_key.pem ec2-user@${{ env.EC2_IP }} << 'REMOTE'
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/modelserve-key-clean.pem ec2-user@${{ env.EC2_IP }} << 'REMOTE'
             set -e
             cd ~/modelserve
             aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+            docker build -f Dockerfile.mlflow -t modelserve-mlflow:latest .
+            docker build -t modelserve:latest .
+            docker tag modelserve-mlflow:latest ${{ env.ECR_REGISTRY }}/${{ env.MLFLOW_REPOSITORY }}:latest
+            docker tag modelserve:latest ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+            docker push ${{ env.ECR_REGISTRY }}/${{ env.MLFLOW_REPOSITORY }}:latest
+            docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
             docker-compose pull
             docker-compose up -d
             docker-compose ps
