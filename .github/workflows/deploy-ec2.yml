@@ -7,7 +7,7 @@ on:
 
 env:
   AWS_REGION: ap-southeast-1
-  ECR_REGISTRY: 679835924810.dkr.ecr.ap-southeast-1.amazonaws.com
+  ECR_REGISTRY: 783879612848.dkr.ecr.ap-southeast-1.amazonaws.com
   ECR_REPOSITORY: modelserve
   MLFLOW_REPOSITORY: modelserve-mlflow
   EC2_INSTANCE_ID: i-06b88a559799162a7
