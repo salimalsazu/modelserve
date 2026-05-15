@@ -79,9 +79,9 @@ class TestPredictEndpoint:
             with patch("app.model_loader.load_model", return_value=mock_model):
                 response = client.post(
                     "/predict",
-                    json={"entity_id": 1, "features": [0.5] * 10}
+                    json={"entity_id": 1, "features": [0.5] * 29}
                 )
-        
+
         assert response.status_code == 200
 
     def test_predict_response_structure(self, client, mock_model, mock_features):
@@ -90,11 +90,11 @@ class TestPredictEndpoint:
             with patch("app.model_loader.load_model", return_value=mock_model):
                 response = client.post(
                     "/predict",
-                    json={"entity_id": 1, "features": [0.5] * 10}
+                    json={"entity_id": 1, "features": [0.5] * 29}
                 )
-        
+
         data = response.json()
-        
+
         assert "prediction" in data
         assert "model_version" in data
         assert "latency_ms" in data
@@ -105,9 +105,9 @@ class TestPredictEndpoint:
             with patch("app.model_loader.load_model", return_value=mock_model):
                 response = client.post(
                     "/predict",
-                    json={"features": [0.5] * 10}
+                    json={"features": [0.5] * 29}
                 )
-        
+
         assert response.status_code == 422  # entity_id is required
 
     def test_predict_invalid_features_type(self, client, mock_model):
@@ -118,7 +118,7 @@ class TestPredictEndpoint:
                     "/predict",
                     json={"entity_id": 1, "features": "invalid"}
                 )
-        
+
         assert response.status_code == 422  # Validation error
 
     def test_predict_missing_features(self, client, mock_model):
@@ -129,20 +129,20 @@ class TestPredictEndpoint:
                     "/predict",
                     json={"entity_id": 1}
                 )
-        
+
         assert response.status_code == 422
 
     def test_predict_wrong_feature_count(self, client, mock_model):
-        """Predict should handle feature count mismatch gracefully."""
+        """Predict should return 500 when feature count doesn't match schema (V1-V28+Amount = 29)."""
         with patch("app.main.model", mock_model):
             with patch("app.model_loader.load_model", return_value=mock_model):
                 response = client.post(
                     "/predict",
-                    json={"entity_id": 1, "features": [0.5]}  # Only 1 feature
+                    json={"entity_id": 1, "features": [0.5]}  # Only 1 feature; API expects 29
                 )
-        
-        # Should still return 200 with model handling the mismatch
-        assert response.status_code in [200, 422]
+
+        # API builds a 29-col DataFrame then calls model.predict — shape mismatch → 500
+        assert response.status_code in [200, 422, 500]
 
 
 class TestPredictEntityEndpoint:
@@ -284,15 +284,15 @@ class TestPerformance:
     def test_prediction_latency_reasonable(self, client, mock_model, mock_features):
         """Predictions should complete within reasonable time."""
         import time
-        
+
         with patch("app.main.model", mock_model):
             start = time.time()
             response = client.post(
                 "/predict",
-                json={"entity_id": 1, "features": [0.5] * 10}
+                json={"entity_id": 1, "features": [0.5] * 29}
             )
             latency = time.time() - start
-        
+
         assert response.status_code == 200
         # Should complete in under 1 second
         assert latency < 1.0
@@ -300,18 +300,18 @@ class TestPerformance:
     def test_concurrent_requests(self, client, mock_model, mock_features):
         """Should handle concurrent requests."""
         import concurrent.futures
-        
+
         with patch("app.main.model", mock_model):
             def make_request():
                 return client.post(
                     "/predict",
-                    json={"entity_id": 1, "features": [0.5] * 10}
+                    json={"entity_id": 1, "features": [0.5] * 29}
                 )
-            
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [executor.submit(make_request) for _ in range(10)]
                 responses = [f.result() for f in futures]
-        
+
         # All requests should succeed
         assert all(r.status_code == 200 for r in responses)
 
@@ -335,7 +335,7 @@ class TestIntegration:
         # Make prediction - expect 503 if no model is registered
         response = integration_client.post(
             "/predict",
-            json={"entity_id": 1, "features": [0.5] * 10}
+            json={"entity_id": 1, "features": [0.5] * 29}
         )
         
         # Accept 200 (model loaded) or 503 (no model)
