@@ -110,9 +110,9 @@ jobs:
         env:
           EC2_IP: ${{ steps.ec2.outputs.public_ip }}
         run: |
-          # Create remote directory structure
+          # Create remote directory structure and fix ownership
           ssh -o StrictHostKeyChecking=no -i /tmp/ec2_key ec2-user@"$EC2_IP" \
-            "mkdir -p ~/modelserve/monitoring/prometheus ~/modelserve/monitoring/grafana ~/modelserve/models"
+            "sudo mkdir -p ~/modelserve/monitoring/prometheus ~/modelserve/monitoring/grafana ~/modelserve/models && sudo chown -R ec2-user:ec2-user ~/modelserve"
 
           # Copy compose file
           scp -o StrictHostKeyChecking=no -i /tmp/ec2_key \
