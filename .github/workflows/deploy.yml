@@ -102,6 +102,7 @@ jobs:
           aws ec2-instance-connect send-ssh-public-key \
             --instance-id "${{ steps.ec2.outputs.instance_id }}" \
             --availability-zone "${{ env.AWS_REGION }}a" \
+            --instance-os-user ec2-user \
             --ssh-public-key file:///tmp/ec2_key.pub
           chmod 600 /tmp/ec2_key
 
