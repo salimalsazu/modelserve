@@ -11,6 +11,7 @@ env:
   ECR_MLFLOW_REPO: 679835924810.dkr.ecr.ap-southeast-1.amazonaws.com/modelserve-mlflow-d1fddd3
   EC2_IP: 52.76.194.2
   EC2_INSTANCE_ID: i-039524dcb8de929c3
+  AWS_ACCOUNT_ID: "679835924810"
 
 jobs:
   build:
@@ -28,7 +29,7 @@ jobs:
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::679835924810:role/github-actions-role
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-role
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
@@ -69,7 +70,7 @@ jobs:
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::679835924810:role/github-actions-role
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-role
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Generate SSH key for EC2
