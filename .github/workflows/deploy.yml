@@ -112,16 +112,22 @@ jobs:
         run: |
           # Create remote directory structure
           ssh -o StrictHostKeyChecking=no -i /tmp/ec2_key ec2-user@"$EC2_IP" \
-            "mkdir -p ~/modelserve/monitoring/prometheus ~/modelserve/monitoring/grafana"
+            "mkdir -p ~/modelserve/monitoring/prometheus ~/modelserve/monitoring/grafana ~/modelserve/models"
 
-          # Copy compose file and monitoring config
+          # Copy compose file
           scp -o StrictHostKeyChecking=no -i /tmp/ec2_key \
             docker-compose.yml \
             ec2-user@"$EC2_IP":~/modelserve/docker-compose.yml
 
+          # Copy monitoring config
           scp -o StrictHostKeyChecking=no -i /tmp/ec2_key -r \
             monitoring/ \
             ec2-user@"$EC2_IP":~/modelserve/
+
+          # Copy model file (used as fallback if MLflow registry is empty)
+          scp -o StrictHostKeyChecking=no -i /tmp/ec2_key \
+            fraud_model_v2.pkl \
+            ec2-user@"$EC2_IP":~/modelserve/models/model.pkl
 
       - name: Deploy
         env:
