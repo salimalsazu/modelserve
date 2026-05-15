@@ -106,6 +106,14 @@ jobs:
             --ssh-public-key file:///tmp/ec2_key.pub
           chmod 600 /tmp/ec2_key
 
+      - name: Copy compose files to EC2
+        env:
+          EC2_IP: ${{ steps.ec2.outputs.public_ip }}
+        run: |
+          scp -o StrictHostKeyChecking=no -i /tmp/ec2_key \
+            docker-compose.yml \
+            ec2-user@"$EC2_IP":~/modelserve/docker-compose.yml
+
       - name: Deploy
         env:
           ECR_REGISTRY: ${{ needs.build-push.outputs.ecr_registry }}
@@ -129,7 +137,6 @@ jobs:
             docker pull "$ECR_REGISTRY/modelserve-api-prod:$IMAGE_TAG"
             docker pull "$ECR_REGISTRY/modelserve-mlflow-prod:$IMAGE_TAG"
 
-            # Point compose to the exact digest so rollback is easy
             export API_IMAGE="$ECR_REGISTRY/modelserve-api-prod:$IMAGE_TAG"
             export MLFLOW_IMAGE="$ECR_REGISTRY/modelserve-mlflow-prod:$IMAGE_TAG"
 
