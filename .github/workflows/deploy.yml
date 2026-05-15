@@ -1,29 +1,93 @@
-name: Deploy to AWS
+name: Deploy with Pulumi & GitHub Actions
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Environment to deploy'
-        required: true
-        default: 'dev'
-        type: choice
-        options:
-          - dev
-          - staging
-          - prod
-      version:
-        description: 'Image tag or "latest"'
-        required: false
-        default: 'latest'
+
+env:
+  AWS_REGION: ap-southeast-1
 
 jobs:
-  deploy:
+  # ============================================
+  # 1. Pulumi: Provision Infrastructure
+  # ============================================
+  infrastructure:
+    name: Provision Infrastructure
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment }}
-    
+
     steps:
-      - name: Checkout
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Load environment variables
+        run: |
+          if [ -f .env ]; then
+            cp .env .env.local
+          fi
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          echo "AWS_REGION=${{ env.AWS_REGION }}" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Pulumi
+        uses: pulumi/actions@v4
+        with:
+          workdir: infrastructure/python
+
+      - name: Login to Pulumi
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+        run: |
+          cd infrastructure/python
+          pulumi login --token=$PULUMI_ACCESS_TOKEN || pulumi login --local
+
+      - name: Install Python dependencies for Pulumi
+        run: |
+          cd infrastructure/python
+          pip install -r requirements.txt
+
+      - name: Configure Pulumi stack
+        run: |
+          cd infrastructure/python
+          pulumi config set project_name modelserve --stack production
+          pulumi config set aws_region ap-southeast-1 --stack production
+
+      - name: Run Pulumi up
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+        run: |
+          cd infrastructure/python
+          pulumi up --yes --stack production
+
+      - name: Save Pulumi outputs
+        run: |
+          cd infrastructure/python
+          echo "EC2_IP=$(pulumi stack output elastic_ip --stack production)" >> $GITHUB_ENV
+          echo "ECR_API_REPO=$(pulumi stack output ecr_api_repo --stack production)" >> $GITHUB_ENV
+          echo "ECR_MLFLOW_REPO=$(pulumi stack output ecr_mlflow_repo --stack production)" >> $GITHUB_ENV
+          echo "INSTANCE_ID=$(pulumi stack output instance_id --stack production)" >> $GITHUB_ENV
+          echo "EC2_IP=$(pulumi stack output elastic_ip --stack production)"
+
+  # ============================================
+  # 2. Build & Push Docker Images
+  # ============================================
+  build:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    needs: infrastructure
+
+    steps:
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
@@ -31,75 +95,123 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get EC2 instance IP
-        id: ec2
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build API Image
         run: |
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=modelserve-${{ github.event.inputs.environment }}" \
-            --query 'Reservations[0].Instances[0].InstanceId' \
-            --output text)
-          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          
-          IP=$(aws ec2 describe-instances \
-            --instance-ids $INSTANCE_ID \
-            --query 'Reservations[0].Instances[0].PublicIpAddress' \
-            --output text)
-          echo "ip=$IP" >> $GITHUB_OUTPUT
+          docker build -t modelserve-api:latest .
+          docker tag modelserve-api:latest ${{ env.ECR_API_REPO }}:latest
 
-      - name: Deploy to EC2
-        env:
-          EC2_IP: ${{ steps.ec2.outputs.ip }}
-          VERSION: ${{ github.event.inputs.version }}
+      - name: Build MLflow Image
         run: |
-          echo "Deploying modelserve:${VERSION} to $EC2_IP"
-          
-          # Get ECR login token
-          aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_REGISTRY
-          
-          # Pull and restart container
-          ssh -o StrictHostKeyChecking=no ec2-user@$EC2_IP << 'EOF'
-            set -e
-            VERSION=${VERSION:-latest}
-            REGION=$(curl -s http://169.254.169.254/latest/meta-data/region)
-            ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-            
-            # Pull new image
-            docker pull $ECR_REGISTRY/modelserve:$VERSION || echo "Image not found, using local"
-            
-            # Blue-green deployment
-            docker stop modelserve-old 2>/dev/null || true
-            docker rm modelserve-old 2>/dev/null || true
-            docker stop modelserve 2>/dev/null || true
-            docker rm modelserve 2>/dev/null || true
-            
-            docker run -d \
-              --name modelserve \
-              -p 8000:8000 \
-              --restart unless-stopped \
-              -e MLFLOW_TRACKING_URI=http://mlflow:5000 \
-              $ECR_REGISTRY/modelserve:$VERSION
-            
-            # Health check
-            sleep 10
-            curl -f http://localhost:8000/health || exit 1
-            
-            echo "Deployment successful"
-          EOF
+          docker build -f Dockerfile.mlflow -t modelserve-mlflow:latest .
+          docker tag modelserve-mlflow:latest ${{ env.ECR_MLFLOW_REPO }}:latest
 
-      - name: Verify deployment
+      - name: Push Images to ECR
         run: |
-          curl -f https://api.modelserve.${{ github.event.inputs.environment }}.example.com/health || \
-          curl -f http://${{ steps.ec2.outputs.ip }}:8000/health
+          docker push ${{ env.ECR_API_REPO }}:latest
+          docker push ${{ env.ECR_MLFLOW_REPO }}:latest
 
-  rollback:
+  # ============================================
+  # 3. Deploy to EC2
+  # ============================================
+  deploy:
+    name: Deploy to EC2
     runs-on: ubuntu-latest
-    if: failure()
-    
+    needs: [infrastructure, build]
+    environment: production
+
     steps:
-      - name: Rollback deployment
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get EC2 Public IP
         run: |
-          echo "Deployment failed! Initiating rollback..."
-          # The previous container is still available if blue-green was used
-          # In production, trigger PagerDuty, notify Slack
+          EC2_IP=$(cd infrastructure/python && pulumi stack output elastic_ip --stack production)
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+          echo "EC2_IP=$EC2_IP"
+
+      - name: Save SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Wait for EC2 to be ready
+        run: sleep 60
+
+      - name: Deploy application to EC2
+        run: |
+          scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i ~/.ssh/id_rsa \
+            docker-compose.yml Dockerfile Dockerfile.mlflow \
+            requirements.txt .env \
+            ec2-user@${{ env.EC2_IP }}:~/modelserve/
+
+          scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i ~/.ssh/id_rsa -r \
+            app/ training/ feast_repo/ monitoring/ \
+            ec2-user@${{ env.EC2_IP }}:~/modelserve/
+
+      - name: Setup Docker on EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i ~/.ssh/id_rsa ec2-user@${{ env.EC2_IP }} << 'REMOTE'
+            set -e
+            sudo yum install -y docker
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            sudo usermod -aG docker ec2-user
+            mkdir -p ~/.aws
+            cat > ~/.aws/credentials << 'AWSCREDS'
+[default]
+aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}
+aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+region=ap-southeast-1
+AWSCREDS
+            aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin ${{ env.ECR_API_REPO }}
+            aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin ${{ env.ECR_MLFLOW_REPO }}
+          REMOTE
+
+      - name: Start services with docker-compose
+        run: |
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i ~/.ssh/id_rsa ec2-user@${{ env.EC2_IP }} << 'REMOTE'
+            set -e
+            cd ~/modelserve
+            chmod 600 ~/.ssh/id_rsa
+            docker-compose up -d
+            sleep 30
+            docker-compose ps
+            docker-compose logs --tail 20
+          REMOTE
+
+      - name: Health check
+        run: |
+          sleep 30
+          echo "Checking API health at http://${{ env.EC2_IP }}:8000/health"
+          curl -f --max-time 30 http://${{ env.EC2_IP }}:8000/health || echo "API not ready yet"
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "## Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| EC2 IP | ${{ env.EC2_IP }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| API | http://${{ env.EC2_IP }}:8000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| API Docs | http://${{ env.EC2_IP }}:8000/docs |" >> $GITHUB_STEP_SUMMARY
+          echo "| MLflow | http://${{ env.EC2_IP }}:5000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Prometheus | http://${{ env.EC2_IP }}:9090 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana | http://${{ env.EC2_IP }}:3000 |" >> $GITHUB_STEP_SUMMARY
