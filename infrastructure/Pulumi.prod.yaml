@@ -1,0 +1,4 @@
+encryptionsalt: v1:TWwP2n9EROk=:v1:pUQ+26fJ9dkzDAtd:1o+/fCcmilHL2A5ABZeNKjAqbxT5ww==
+config:
+  aws:region: ap-southeast-1
+  modelserve:github_repo: salimalsazu/modelserve
