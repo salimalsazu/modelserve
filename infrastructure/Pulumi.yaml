@@ -1,3 +1,6 @@
-name: modelserve-infra
+name: modelserve
 runtime: python
-description: AWS infrastructure for ModelServe (EC2, S3, ECR)
+description: ModelServe AWS infrastructure — ECR, EC2, S3, IAM, OIDC for GitHub Actions
+
+config:
+  aws:region: ap-southeast-1

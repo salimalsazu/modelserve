@@ -1,300 +1,324 @@
-"""
-Pulumi Infrastructure for ModelServe AWS Environment.
-Region: ap-southeast-1 (Singapore)
+"""ModelServe AWS infrastructure — ap-southeast-1 (Singapore)
+
+Resources:
+  - GitHub Actions OIDC provider + IAM role (no static credentials needed)
+  - VPC, subnet, internet gateway, route table
+  - Security group for all ModelServe ports
+  - IAM instance role (EC2 → ECR read + S3)
+  - ECR repositories (API + MLflow) with lifecycle policy
+  - S3 bucket for MLflow artifacts (private)
+  - EC2 instance (t3.medium, Amazon Linux 2023) with Elastic IP
 """
 
-import os
+import json
 import pulumi
 import pulumi_aws as aws
 
-# Configuration
-config = pulumi.Config()
-environment = config.get("environment") or "dev"
-aws_region = config.get("aws_region") or "ap-southeast-1"
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
-# Tags for all resources
-tags = {
-    "Project": "ModelServe",
-    "Environment": environment,
-    "ManagedBy": "Pulumi",
-}
+cfg = pulumi.Config()
+env = cfg.get("environment") or "prod"
+github_repo = cfg.get("github_repo") or "salimalsazu/modelserve"  # owner/repo
 
-# ============================================
-# VPC and Networking
-# ============================================
+region = "ap-southeast-1"
+account_id = aws.get_caller_identity().account_id
 
-# Try to get default VPC first, create new one if not exists
-try:
-    default_vpc = aws.ec2.get_vpc(default=True)
-    vpc_id = default_vpc.id
-    vpc_cidr = default_vpc.cidr_block
-    print(f"Using existing VPC: {vpc_id}")
-except Exception:
-    print("No default VPC found, creating new VPC...")
-    main_vpc = aws.ec2.Vpc(
-        "modelserve-main-vpc",
-        cidr_block="10.0.0.0/16",
-        enable_dns_hostnames=True,
-        enable_dns_support=True,
-        tags={**tags, "Name": f"modelserve-vpc-{environment}"},
-    )
-    vpc_id = main_vpc.id
-    vpc_cidr = main_vpc.cidr_block
-    
-    # Internet Gateway
-    internet_gateway = aws.ec2.InternetGateway(
-        "modelserve-igw",
-        vpc_id=vpc_id,
-        tags={**tags, "Name": f"modelserve-igw-{environment}"},
-    )
-    
-    # Public Subnet
-    public_subnet = aws.ec2.Subnet(
-        "modelserve-public-subnet",
-        vpc_id=vpc_id,
-        cidr_block="10.0.1.0/24",
-        availability_zone=f"{aws_region}a",
-        map_public_ip_on_launch=True,
-        tags={**tags, "Name": f"modelserve-public-subnet-{environment}"},
-    )
-    
-    # Route Table
-    route_table = aws.ec2.RouteTable(
-        "modelserve-route-table",
-        vpc_id=vpc_id,
-        routes=[
-            aws.ec2.RouteTableRouteArgs(
-                cidr_block="0.0.0.0/0",
-                gateway_id=internet_gateway.id,
-            )
+tags = {"Project": "ModelServe", "Environment": env, "ManagedBy": "Pulumi"}
+
+# ---------------------------------------------------------------------------
+# GitHub Actions OIDC — lets CI assume a role without static AWS credentials
+# ---------------------------------------------------------------------------
+
+oidc_provider = aws.iam.OpenIdConnectProvider(
+    "github-oidc",
+    url="https://token.actions.githubusercontent.com",
+    client_id_list=["sts.amazonaws.com"],
+    thumbprint_list=["6938fd4d98bab03faadb97b34396831e3780aea1"],
+    tags=tags,
+)
+
+github_actions_role = aws.iam.Role(
+    "github-actions-role",
+    name=f"modelserve-github-actions-{env}",
+    assume_role_policy=oidc_provider.arn.apply(
+        lambda arn: json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Federated": arn},
+                "Action": "sts:AssumeRoleWithWebIdentity",
+                "Condition": {
+                    "StringEquals": {
+                        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+                    },
+                    "StringLike": {
+                        "token.actions.githubusercontent.com:sub":
+                            f"repo:{github_repo}:*"
+                    },
+                },
+            }],
+        })
+    ),
+    tags=tags,
+)
+
+github_actions_policy = aws.iam.Policy(
+    "github-actions-policy",
+    name=f"modelserve-github-actions-policy-{env}",
+    policy=json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "ECRAuth",
+                "Effect": "Allow",
+                "Action": "ecr:GetAuthorizationToken",
+                "Resource": "*",
+            },
+            {
+                "Sid": "ECRPush",
+                "Effect": "Allow",
+                "Action": [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:CompleteLayerUpload",
+                    "ecr:InitiateLayerUpload",
+                    "ecr:PutImage",
+                    "ecr:UploadLayerPart",
+                    "ecr:BatchGetImage",
+                    "ecr:GetDownloadUrlForLayer",
+                ],
+                "Resource": f"arn:aws:ecr:{region}:{account_id}:repository/modelserve*",
+            },
+            {
+                "Sid": "EC2Connect",
+                "Effect": "Allow",
+                "Action": "ec2-instance-connect:SendSSHPublicKey",
+                "Resource": f"arn:aws:ec2:{region}:{account_id}:instance/*",
+                "Condition": {"StringEquals": {"ec2:osuser": "ec2-user"}},
+            },
+            {
+                "Sid": "EC2Describe",
+                "Effect": "Allow",
+                "Action": "ec2:DescribeInstances",
+                "Resource": "*",
+            },
         ],
-        tags={**tags, "Name": f"modelserve-route-table-{environment}"},
-    )
-    
-    # Associate Route Table
-    aws.ec2.RouteTableAssociation(
-        "modelserve-rt-association",
-        subnet_id=public_subnet.id,
-        route_table_id=route_table.id,
-    )
-
-# Create security groups
-api_security_group = aws.ec2.SecurityGroup(
-    "modelserve-api-sg",
-    name=f"modelserve-api-{environment}",
-    description="Security group for ModelServe API",
-    vpc_id=vpc_id,
-    tags={**tags, "Name": f"modelserve-api-sg-{environment}"},
+    }),
+    tags=tags,
 )
 
-# Security group rules
-aws.ec2.SecurityGroupRule(
-    "ssh-access",
-    type="ingress",
-    from_port=22,
-    to_port=22,
-    protocol="tcp",
-    cidr_blocks=["0.0.0.0/0"],
-    security_group_id=api_security_group.id,
+aws.iam.RolePolicyAttachment(
+    "github-actions-policy-attach",
+    role=github_actions_role.name,
+    policy_arn=github_actions_policy.arn,
 )
 
-aws.ec2.SecurityGroupRule(
-    "http-access",
-    type="ingress",
-    from_port=80,
-    to_port=80,
-    protocol="tcp",
-    cidr_blocks=["0.0.0.0/0"],
-    security_group_id=api_security_group.id,
+# ---------------------------------------------------------------------------
+# VPC & Networking
+# ---------------------------------------------------------------------------
+
+vpc = aws.ec2.Vpc(
+    "vpc",
+    cidr_block="10.0.0.0/16",
+    enable_dns_hostnames=True,
+    enable_dns_support=True,
+    tags={**tags, "Name": f"modelserve-vpc-{env}"},
 )
 
-aws.ec2.SecurityGroupRule(
-    "api-access",
-    type="ingress",
-    from_port=8000,
-    to_port=8000,
-    protocol="tcp",
-    cidr_blocks=["0.0.0.0/0"],
-    security_group_id=api_security_group.id,
+igw = aws.ec2.InternetGateway(
+    "igw",
+    vpc_id=vpc.id,
+    tags={**tags, "Name": f"modelserve-igw-{env}"},
 )
 
-aws.ec2.SecurityGroupRule(
-    "mlflow-access",
-    type="ingress",
-    from_port=5000,
-    to_port=5000,
-    protocol="tcp",
-    cidr_blocks=["0.0.0.0/0"],
-    security_group_id=api_security_group.id,
+public_subnet = aws.ec2.Subnet(
+    "public-subnet",
+    vpc_id=vpc.id,
+    cidr_block="10.0.1.0/24",
+    availability_zone=f"{region}a",
+    map_public_ip_on_launch=True,
+    tags={**tags, "Name": f"modelserve-public-subnet-{env}"},
 )
 
-aws.ec2.SecurityGroupRule(
-    "prometheus-access",
-    type="ingress",
-    from_port=9090,
-    to_port=9090,
-    protocol="tcp",
-    cidr_blocks=["0.0.0.0/0"],
-    security_group_id=api_security_group.id,
+route_table = aws.ec2.RouteTable(
+    "route-table",
+    vpc_id=vpc.id,
+    routes=[{"cidrBlock": "0.0.0.0/0", "gatewayId": igw.id}],
+    tags={**tags, "Name": f"modelserve-rt-{env}"},
 )
 
-aws.ec2.SecurityGroupRule(
-    "grafana-access",
-    type="ingress",
-    from_port=3000,
-    to_port=3000,
-    protocol="tcp",
-    cidr_blocks=["0.0.0.0/0"],
-    security_group_id=api_security_group.id,
+aws.ec2.RouteTableAssociation(
+    "rt-assoc",
+    subnet_id=public_subnet.id,
+    route_table_id=route_table.id,
 )
 
-aws.ec2.SecurityGroupRule(
-    "all-egress",
-    type="egress",
-    from_port=0,
-    to_port=0,
-    protocol="-1",
-    cidr_blocks=["0.0.0.0/0"],
-    security_group_id=api_security_group.id,
+# ---------------------------------------------------------------------------
+# Security Group
+# ---------------------------------------------------------------------------
+
+sg = aws.ec2.SecurityGroup(
+    "sg",
+    name=f"modelserve-sg-{env}",
+    description="ModelServe — API, MLflow, Prometheus, Grafana, SSH",
+    vpc_id=vpc.id,
+    ingress=[
+        {"protocol": "tcp", "fromPort": 22,   "toPort": 22,   "cidrBlocks": ["0.0.0.0/0"], "description": "SSH"},
+        {"protocol": "tcp", "fromPort": 80,   "toPort": 80,   "cidrBlocks": ["0.0.0.0/0"], "description": "HTTP"},
+        {"protocol": "tcp", "fromPort": 8000, "toPort": 8000, "cidrBlocks": ["0.0.0.0/0"], "description": "FastAPI"},
+        {"protocol": "tcp", "fromPort": 5000, "toPort": 5000, "cidrBlocks": ["0.0.0.0/0"], "description": "MLflow"},
+        {"protocol": "tcp", "fromPort": 9090, "toPort": 9090, "cidrBlocks": ["0.0.0.0/0"], "description": "Prometheus"},
+        {"protocol": "tcp", "fromPort": 3000, "toPort": 3000, "cidrBlocks": ["0.0.0.0/0"], "description": "Grafana"},
+    ],
+    egress=[
+        {"protocol": "-1", "fromPort": 0, "toPort": 0, "cidrBlocks": ["0.0.0.0/0"], "description": "All outbound"},
+    ],
+    tags={**tags, "Name": f"modelserve-sg-{env}"},
 )
 
-# ============================================
-# IAM Role for EC2
-# ============================================
+# ---------------------------------------------------------------------------
+# IAM Instance Role (EC2 → ECR read + S3)
+# ---------------------------------------------------------------------------
 
 instance_role = aws.iam.Role(
-    "modelserve-instance-role",
-    name=f"modelserve-instance-role-{environment}",
-    assume_role_policy="""{
+    "instance-role",
+    name=f"modelserve-instance-role-{env}",
+    assume_role_policy=json.dumps({
         "Version": "2012-10-17",
         "Statement": [{
-            "Action": "sts:AssumeRole",
             "Effect": "Allow",
-            "Principal": {"Service": "ec2.amazonaws.com"}
-        }]
-    }""",
+            "Principal": {"Service": "ec2.amazonaws.com"},
+            "Action": "sts:AssumeRole",
+        }],
+    }),
+    tags=tags,
 )
+
+for policy_arn, logical_name in [
+    ("arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly", "ecr-read"),
+    ("arn:aws:iam::aws:policy/AmazonS3FullAccess", "s3-full"),
+]:
+    aws.iam.RolePolicyAttachment(
+        f"instance-{logical_name}",
+        role=instance_role.name,
+        policy_arn=policy_arn,
+    )
 
 instance_profile = aws.iam.InstanceProfile(
-    "modelserve-instance-profile",
-    name=f"modelserve-instance-profile-{environment}",
+    "instance-profile",
+    name=f"modelserve-instance-profile-{env}",
     role=instance_role.name,
 )
 
-aws.iam.RolePolicyAttachment(
-    "s3-access",
-    role=instance_role.name,
-    policy_arn="arn:aws:iam::aws:policy/AmazonS3FullAccess",
-)
+# ---------------------------------------------------------------------------
+# ECR Repositories
+# ---------------------------------------------------------------------------
 
-aws.iam.RolePolicyAttachment(
-    "ecr-readonly",
-    role=instance_role.name,
-    policy_arn="arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
-)
+_lifecycle_policy = json.dumps({
+    "rules": [{
+        "rulePriority": 1,
+        "description": "Keep last 10 images",
+        "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10},
+        "action": {"type": "expire"},
+    }]
+})
 
-# ============================================
-# ECR Repository
-# ============================================
-
-ecr_repository = aws.ecr.Repository(
-    "modelserve",
-    name=f"modelserve-{environment}",
+api_repo = aws.ecr.Repository(
+    "ecr-api",
+    name=f"modelserve-api-{env}",
     image_tag_mutability="MUTABLE",
-    image_scanning_configuration=aws.ecr.RepositoryImageScanningConfigurationArgs(
-        scan_on_push=True,
-    ),
-    encryption_configuration=aws.ecr.RepositoryEncryptionConfigurationArgs(
-        encryption_type="AES256",
-    ),
-    tags={**tags, "Name": f"modelserve-{environment}"},
+    image_scanning_configuration={"scanOnPush": True},
+    encryption_configuration={"encryptionType": "AES256"},
+    tags={**tags, "Name": f"modelserve-api-{env}"},
 )
 
-aws.ecr.LifecyclePolicy(
-    "modelserve-lifecycle",
-    repository=ecr_repository.name,
-    policy="""{
-        "rules": [{
-            "rulePriority": 1,
-            "description": "Keep last 10 images",
-            "selection": {
-                "tagStatus": "any",
-                "countType": "imageCountMoreThan",
-                "countNumber": 10
-            },
-            "action": {
-                "type": "expire"
-            }
-        }]
-    }""",
+aws.ecr.LifecyclePolicy("ecr-api-lifecycle", repository=api_repo.name, policy=_lifecycle_policy)
+
+mlflow_repo = aws.ecr.Repository(
+    "ecr-mlflow",
+    name=f"modelserve-mlflow-{env}",
+    image_tag_mutability="MUTABLE",
+    image_scanning_configuration={"scanOnPush": True},
+    encryption_configuration={"encryptionType": "AES256"},
+    tags={**tags, "Name": f"modelserve-mlflow-{env}"},
 )
 
-# ============================================
-# S3 Bucket for MLflow Artifacts
-# ============================================
+aws.ecr.LifecyclePolicy("ecr-mlflow-lifecycle", repository=mlflow_repo.name, policy=_lifecycle_policy)
 
-mlflow_bucket = aws.s3.BucketV2(
-    "modelserve-artifacts",
-    bucket=f"modelserve-artifacts-{environment}-{aws.get_caller_identity().account_id}",
-    tags={**tags, "Name": f"modelserve-artifacts-{environment}"},
+# ---------------------------------------------------------------------------
+# S3 — MLflow artifact store
+# ---------------------------------------------------------------------------
+
+artifacts_bucket = aws.s3.BucketV2(
+    "mlflow-artifacts",
+    bucket=f"modelserve-artifacts-{env}-{account_id}",
+    tags={**tags, "Name": f"modelserve-artifacts-{env}"},
 )
 
 aws.s3.BucketPublicAccessBlock(
     "mlflow-artifacts-block",
-    bucket=mlflow_bucket.id,
+    bucket=artifacts_bucket.id,
     block_public_acls=True,
     block_public_policy=True,
     ignore_public_acls=True,
     restrict_public_buckets=True,
 )
 
-# ============================================
+# ---------------------------------------------------------------------------
 # EC2 Instance
-# ============================================
+# ---------------------------------------------------------------------------
 
-# Get Amazon Linux 2023 AMI
 ami = aws.ec2.get_ami(
     most_recent=True,
     owners=["amazon"],
-    filters=[aws.ec2.GetAmiFilterArgs(name="name", values=["al2023-ami-*"])],
+    filters=[{"name": "name", "values": ["al2023-ami-*-x86_64"]}],
 )
 
-ec2_instance = aws.ec2.Instance(
-    "modelserve-ec2",
+user_data = """#!/bin/bash
+set -e
+dnf update -y
+dnf install -y docker
+systemctl enable --now docker
+usermod -aG docker ec2-user
+# Docker Compose v2 plugin
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+# app directory
+mkdir -p /home/ec2-user/modelserve
+chown ec2-user:ec2-user /home/ec2-user/modelserve
+"""
+
+ec2 = aws.ec2.Instance(
+    "ec2",
     ami=ami.id,
     instance_type="t3.medium",
-    vpc_security_group_ids=[api_security_group.id],
+    subnet_id=public_subnet.id,
+    vpc_security_group_ids=[sg.id],
     iam_instance_profile=instance_profile.name,
-    user_data="""#!/bin/bash
-yum update -y
-yum install -y docker
-systemctl start docker
-systemctl enable docker
-usermod -aG docker ec2-user
-curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-chmod +x /usr/local/bin/docker-compose
-ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
-""",
-    tags={**tags, "Name": f"modelserve-{environment}-instance"},
+    associate_public_ip_address=True,
+    user_data=user_data,
+    root_block_device={"volumeSize": 30, "volumeType": "gp3", "deleteOnTermination": True},
+    tags={**tags, "Name": f"modelserve-{env}"},
 )
 
-# Elastic IP
 eip = aws.ec2.Eip(
-    "modelserve-eip",
+    "eip",
     domain="vpc",
-    instance=ec2_instance.id,
-    tags={**tags, "Name": f"modelserve-{environment}-eip"},
+    instance=ec2.id,
+    tags={**tags, "Name": f"modelserve-eip-{env}"},
 )
 
-# ============================================
+# ---------------------------------------------------------------------------
 # Outputs
-# ============================================
+# ---------------------------------------------------------------------------
 
-pulumi.export("ec2_public_ip", ec2_instance.public_ip)
-pulumi.export("ec2_private_ip", ec2_instance.private_ip)
-pulumi.export("ec2_instance_id", ec2_instance.id)
-pulumi.export("ecr_repository_url", ecr_repository.repository_url)
-pulumi.export("ecr_registry", ecr_repository.registry_id)
-pulumi.export("s3_bucket_name", mlflow_bucket.bucket)
-pulumi.export("security_group_id", api_security_group.id)
-pulumi.export("vpc_id", vpc_id)
+pulumi.export("ec2_public_ip", eip.public_ip)
+pulumi.export("ec2_instance_id", ec2.id)
+pulumi.export("ecr_api_url", api_repo.repository_url)
+pulumi.export("ecr_mlflow_url", mlflow_repo.repository_url)
+pulumi.export("ecr_registry", api_repo.repository_url.apply(lambda u: u.split("/")[0]))
+pulumi.export("s3_bucket", artifacts_bucket.bucket)
+pulumi.export("github_actions_role_arn", github_actions_role.arn)
