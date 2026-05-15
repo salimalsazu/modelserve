@@ -4,7 +4,7 @@ Resources:
   - GitHub Actions OIDC provider + IAM role (no static credentials needed)
   - VPC, subnet, internet gateway, route table
   - Security group for all ModelServe ports
-  - IAM instance role (EC2 → ECR read + S3)
+  - IAM instance role (EC2 -> ECR read + S3)
   - ECR repositories (API + MLflow) with lifecycle policy
   - S3 bucket for MLflow artifacts (private)
   - EC2 instance (t3.medium, Amazon Linux 2023) with Elastic IP
@@ -20,7 +20,7 @@ import pulumi_aws as aws
 
 cfg = pulumi.Config()
 env = cfg.get("environment") or "prod"
-github_repo = cfg.get("github_repo") or "salimalsazu/modelserve"  # owner/repo
+github_repo = cfg.get("github_repo") or "salimalsazu/modelserve"
 
 region = "ap-southeast-1"
 account_id = aws.get_caller_identity().account_id
@@ -28,16 +28,19 @@ account_id = aws.get_caller_identity().account_id
 tags = {"Project": "ModelServe", "Environment": env, "ManagedBy": "Pulumi"}
 
 # ---------------------------------------------------------------------------
-# GitHub Actions OIDC — lets CI assume a role without static AWS credentials
+# GitHub Actions OIDC
 # ---------------------------------------------------------------------------
 
-oidc_provider = aws.iam.OpenIdConnectProvider(
-    "github-oidc",
-    url="https://token.actions.githubusercontent.com",
-    client_id_list=["sts.amazonaws.com"],
-    thumbprint_list=["6938fd4d98bab03faadb97b34396831e3780aea1"],
-    tags=tags,
+# OIDC provider already exists in AWS — look it up instead of managing it
+_existing_oidc = aws.iam.get_open_id_connect_provider(
+    url="https://token.actions.githubusercontent.com"
 )
+
+class _OidcRef:
+    """Thin wrapper so the rest of the code can use .arn like a real resource."""
+    arn = pulumi.Output.from_input(_existing_oidc.arn)
+
+oidc_provider = _OidcRef()
 
 github_actions_role = aws.iam.Role(
     "github-actions-role",
@@ -54,8 +57,7 @@ github_actions_role = aws.iam.Role(
                         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
                     },
                     "StringLike": {
-                        "token.actions.githubusercontent.com:sub":
-                            f"repo:{github_repo}:*"
+                        "token.actions.githubusercontent.com:sub": f"repo:{github_repo}:*"
                     },
                 },
             }],
@@ -144,7 +146,12 @@ public_subnet = aws.ec2.Subnet(
 route_table = aws.ec2.RouteTable(
     "route-table",
     vpc_id=vpc.id,
-    routes=[{"cidrBlock": "0.0.0.0/0", "gatewayId": igw.id}],
+    routes=[
+        aws.ec2.RouteTableRouteArgs(
+            cidr_block="0.0.0.0/0",
+            gateway_id=igw.id,
+        )
+    ],
     tags={**tags, "Name": f"modelserve-rt-{env}"},
 )
 
@@ -161,24 +168,24 @@ aws.ec2.RouteTableAssociation(
 sg = aws.ec2.SecurityGroup(
     "sg",
     name=f"modelserve-sg-{env}",
-    description="ModelServe — API, MLflow, Prometheus, Grafana, SSH",
+    description="ModelServe API, MLflow, Prometheus, Grafana, SSH",
     vpc_id=vpc.id,
     ingress=[
-        {"protocol": "tcp", "fromPort": 22,   "toPort": 22,   "cidrBlocks": ["0.0.0.0/0"], "description": "SSH"},
-        {"protocol": "tcp", "fromPort": 80,   "toPort": 80,   "cidrBlocks": ["0.0.0.0/0"], "description": "HTTP"},
-        {"protocol": "tcp", "fromPort": 8000, "toPort": 8000, "cidrBlocks": ["0.0.0.0/0"], "description": "FastAPI"},
-        {"protocol": "tcp", "fromPort": 5000, "toPort": 5000, "cidrBlocks": ["0.0.0.0/0"], "description": "MLflow"},
-        {"protocol": "tcp", "fromPort": 9090, "toPort": 9090, "cidrBlocks": ["0.0.0.0/0"], "description": "Prometheus"},
-        {"protocol": "tcp", "fromPort": 3000, "toPort": 3000, "cidrBlocks": ["0.0.0.0/0"], "description": "Grafana"},
+        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=22,   to_port=22,   cidr_blocks=["0.0.0.0/0"], description="SSH"),
+        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=80,   to_port=80,   cidr_blocks=["0.0.0.0/0"], description="HTTP"),
+        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=8000, to_port=8000, cidr_blocks=["0.0.0.0/0"], description="FastAPI"),
+        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=5000, to_port=5000, cidr_blocks=["0.0.0.0/0"], description="MLflow"),
+        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=9090, to_port=9090, cidr_blocks=["0.0.0.0/0"], description="Prometheus"),
+        aws.ec2.SecurityGroupIngressArgs(protocol="tcp", from_port=3000, to_port=3000, cidr_blocks=["0.0.0.0/0"], description="Grafana"),
     ],
     egress=[
-        {"protocol": "-1", "fromPort": 0, "toPort": 0, "cidrBlocks": ["0.0.0.0/0"], "description": "All outbound"},
+        aws.ec2.SecurityGroupEgressArgs(protocol="-1", from_port=0, to_port=0, cidr_blocks=["0.0.0.0/0"], description="All outbound"),
     ],
     tags={**tags, "Name": f"modelserve-sg-{env}"},
 )
 
 # ---------------------------------------------------------------------------
-# IAM Instance Role (EC2 → ECR read + S3)
+# IAM Instance Role (EC2 -> ECR read + S3)
 # ---------------------------------------------------------------------------
 
 instance_role = aws.iam.Role(
@@ -228,8 +235,8 @@ api_repo = aws.ecr.Repository(
     "ecr-api",
     name=f"modelserve-api-{env}",
     image_tag_mutability="MUTABLE",
-    image_scanning_configuration={"scanOnPush": True},
-    encryption_configuration={"encryptionType": "AES256"},
+    image_scanning_configuration=aws.ecr.RepositoryImageScanningConfigurationArgs(scan_on_push=True),
+    encryption_configurations=[aws.ecr.RepositoryEncryptionConfigurationArgs(encryption_type="AES256")],
     tags={**tags, "Name": f"modelserve-api-{env}"},
 )
 
@@ -239,20 +246,20 @@ mlflow_repo = aws.ecr.Repository(
     "ecr-mlflow",
     name=f"modelserve-mlflow-{env}",
     image_tag_mutability="MUTABLE",
-    image_scanning_configuration={"scanOnPush": True},
-    encryption_configuration={"encryptionType": "AES256"},
+    image_scanning_configuration=aws.ecr.RepositoryImageScanningConfigurationArgs(scan_on_push=True),
+    encryption_configurations=[aws.ecr.RepositoryEncryptionConfigurationArgs(encryption_type="AES256")],
     tags={**tags, "Name": f"modelserve-mlflow-{env}"},
 )
 
 aws.ecr.LifecyclePolicy("ecr-mlflow-lifecycle", repository=mlflow_repo.name, policy=_lifecycle_policy)
 
 # ---------------------------------------------------------------------------
-# S3 — MLflow artifact store
+# S3 - MLflow artifact store (private)
 # ---------------------------------------------------------------------------
 
 artifacts_bucket = aws.s3.BucketV2(
     "mlflow-artifacts",
-    bucket=f"modelserve-artifacts-{env}-{account_id}",
+    bucket=f"modelserve-mlflow-artifacts-{env}-{account_id}",
     tags={**tags, "Name": f"modelserve-artifacts-{env}"},
 )
 
@@ -272,7 +279,7 @@ aws.s3.BucketPublicAccessBlock(
 ami = aws.ec2.get_ami(
     most_recent=True,
     owners=["amazon"],
-    filters=[{"name": "name", "values": ["al2023-ami-*-x86_64"]}],
+    filters=[aws.ec2.GetAmiFilterArgs(name="name", values=["al2023-ami-*-x86_64"])],
 )
 
 user_data = """#!/bin/bash
@@ -281,12 +288,10 @@ dnf update -y
 dnf install -y docker
 systemctl enable --now docker
 usermod -aG docker ec2-user
-# Docker Compose v2 plugin
 mkdir -p /usr/local/lib/docker/cli-plugins
 curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
   -o /usr/local/lib/docker/cli-plugins/docker-compose
 chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-# app directory
 mkdir -p /home/ec2-user/modelserve
 chown ec2-user:ec2-user /home/ec2-user/modelserve
 """
@@ -300,7 +305,11 @@ ec2 = aws.ec2.Instance(
     iam_instance_profile=instance_profile.name,
     associate_public_ip_address=True,
     user_data=user_data,
-    root_block_device={"volumeSize": 30, "volumeType": "gp3", "deleteOnTermination": True},
+    root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(
+        volume_size=30,
+        volume_type="gp3",
+        delete_on_termination=True,
+    ),
     tags={**tags, "Name": f"modelserve-{env}"},
 )
 
