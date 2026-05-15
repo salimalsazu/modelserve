@@ -23,17 +23,14 @@ jobs:
 
       - name: Configure AWS credentials
         run: |
-          export AWS_ACCESS_KEY_ID="${{ vars.AWS_ACCESS_KEY_ID }}"
-          export AWS_SECRET_ACCESS_KEY="${{ vars.AWS_SECRET_ACCESS_KEY }}"
-          export AWS_DEFAULT_REGION="${{ env.AWS_REGION }}"
-          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID"
-          echo "Testing credentials..."
-          aws sts get-caller-identity
+          mkdir -p ~/.aws
+          echo "[default]
+aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}
+aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+region=${{ env.AWS_REGION }}" > ~/.aws/credentials
 
       - name: Login to Amazon ECR
         run: |
-          export AWS_ACCESS_KEY_ID="${{ vars.AWS_ACCESS_KEY_ID }}"
-          export AWS_SECRET_ACCESS_KEY="${{ vars.AWS_SECRET_ACCESS_KEY }}"
           aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin 679835924810.dkr.ecr.ap-southeast-1.amazonaws.com
 
       - name: Set up Docker Buildx
@@ -51,8 +48,6 @@ jobs:
 
       - name: Push Images
         run: |
-          export AWS_ACCESS_KEY_ID="${{ vars.AWS_ACCESS_KEY_ID }}"
-          export AWS_SECRET_ACCESS_KEY="${{ vars.AWS_SECRET_ACCESS_KEY }}"
           docker push ${{ env.ECR_API_REPO }}:latest
           docker push ${{ env.ECR_MLFLOW_REPO }}:latest
 
@@ -65,20 +60,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        run: |
-          export AWS_ACCESS_KEY_ID="${{ vars.AWS_ACCESS_KEY_ID }}"
-          export AWS_SECRET_ACCESS_KEY="${{ vars.AWS_SECRET_ACCESS_KEY }}"
-          aws sts get-caller-identity
-
       - name: Generate SSH key for EC2
         run: |
+          mkdir -p ~/.aws
+          echo "[default]
+aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}
+aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+region=${{ env.AWS_REGION }}" > ~/.aws/credentials
           ssh-keygen -t rsa -b 2048 -f ~/.ssh/ec2_key -N "" -C "github-actions"
 
       - name: Authorize SSH key on EC2
         run: |
-          export AWS_ACCESS_KEY_ID="${{ vars.AWS_ACCESS_KEY_ID }}"
-          export AWS_SECRET_ACCESS_KEY="${{ vars.AWS_SECRET_ACCESS_KEY }}"
           aws ec2-instance-connect send-ssh-public-key \
             --instance-id ${{ env.EC2_INSTANCE_ID }} \
             --availability-zone ap-southeast-1a \
