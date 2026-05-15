@@ -106,13 +106,22 @@ jobs:
             --ssh-public-key file:///tmp/ec2_key.pub
           chmod 600 /tmp/ec2_key
 
-      - name: Copy compose files to EC2
+      - name: Copy app files to EC2
         env:
           EC2_IP: ${{ steps.ec2.outputs.public_ip }}
         run: |
+          # Create remote directory structure
+          ssh -o StrictHostKeyChecking=no -i /tmp/ec2_key ec2-user@"$EC2_IP" \
+            "mkdir -p ~/modelserve/monitoring/prometheus ~/modelserve/monitoring/grafana"
+
+          # Copy compose file and monitoring config
           scp -o StrictHostKeyChecking=no -i /tmp/ec2_key \
             docker-compose.yml \
             ec2-user@"$EC2_IP":~/modelserve/docker-compose.yml
+
+          scp -o StrictHostKeyChecking=no -i /tmp/ec2_key -r \
+            monitoring/ \
+            ec2-user@"$EC2_IP":~/modelserve/
 
       - name: Deploy
         env:
