@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PULUMI_CONFIG_PASSPHRASE=\"\" pulumi preview)",
+      "PowerShell(cd \"F:\\\\AI Exam\\\\modelserve\\\\infrastructure\"; $env:PULUMI_CONFIG_PASSPHRASE = \"\"; .\\\\.venv\\\\Scripts\\\\Activate.ps1; pulumi preview 2>&1)",
+      "PowerShell($env:PULUMI_CONFIG_PASSPHRASE = \"\"; cd \"F:\\\\AI Exam\\\\modelserve\\\\infrastructure\"; .\\\\.venv\\\\Scripts\\\\Activate.ps1; pulumi preview 2>&1)",
+      "PowerShell([System.Environment]::SetEnvironmentVariable\\(\"PULUMI_CONFIG_PASSPHRASE\", \"\", \"Process\"\\); cd \"F:\\\\AI Exam\\\\modelserve\\\\infrastructure\"; .\\\\.venv\\\\Scripts\\\\Activate.ps1; pulumi preview)",
+      "PowerShell(powershell -File \"F:\\\\AI Exam\\\\modelserve\\\\infrastructure\\\\preview.ps1\")",
+      "PowerShell(cmd /c \"set PULUMI_CONFIG_PASSPHRASE=& cd /d F:\\\\AI Exam\\\\modelserve\\\\infrastructure & pulumi preview 2>&1\")",
+      "PowerShell(cd \"F:\\\\AI Exam\\\\modelserve\\\\infrastructure\"; $env:PULUMI_CONFIG_PASSPHRASE=\"\"; .\\\\.venv\\\\Scripts\\\\Activate.ps1; pulumi import aws:iam/openIdConnectProvider:OpenIdConnectProvider github-oidc arn:aws:iam::679835924810:oidc-provider/token.actions.githubusercontent.com --yes 2>&1)",
+      "PowerShell(aws iam list-open-id-connect-providers --output json 2>&1)",
+      "PowerShell(aws iam get-role --role-name modelserve-github-actions-prod --query \"Role.AssumeRolePolicyDocument\" --output json 2>&1)"
+    ]
+  }
+}
