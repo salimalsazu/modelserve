@@ -115,22 +115,19 @@ def load_local_model(path: Optional[str] = None) -> Any:
 def get_model_info() -> Dict[str, Any]:
     """
     Get model metadata from MLflow registry.
-    
+
     Returns:
         Dictionary with model version, stage, and other metadata
     """
-    try:
+    import concurrent.futures
+
+    def _fetch():
         client = get_mlflow_client()
         model_uri = get_model_uri()
-        
-        # Parse model name and stage from URI
         parts = model_uri.replace("models:/", "").split("/")
         model_name = parts[0]
         stage = parts[1] if len(parts) > 1 else None
-        
-        # Get latest model version
         versions = client.get_latest_versions(model_name, stages=[stage] if stage else None)
-        
         if versions:
             latest = versions[0]
             return {
@@ -141,13 +138,16 @@ def get_model_info() -> Dict[str, Any]:
                 "run_id": latest.run_id,
                 "created_at": str(latest.creation_timestamp),
             }
-        
         return {
             "name": MODEL_NAME,
             "version": "unknown",
             "stage": MODEL_STAGE,
         }
-    
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch)
+            return future.result(timeout=5)
     except Exception as e:
         logger.warning(f"Failed to get model info: {e}")
         return {

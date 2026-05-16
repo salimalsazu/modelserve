@@ -36,12 +36,13 @@ logger = logging.getLogger(__name__)
 model = None
 feature_client = None
 mlflow_client = None
+_model_info_cache: dict = {"name": "unknown", "version": "unknown", "stage": "unknown"}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup and cleanup on shutdown."""
-    global model, feature_client, mlflow_client
+    global model, feature_client, mlflow_client, _model_info_cache
     
     logger.info("Starting ModelServe...")
     
@@ -72,12 +73,12 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Feature store initialization failed: {e}")
         feature_client = None
     
-    # Update model version metric
+    # Cache model info and update version metric
     try:
-        model_info = get_model_info()
+        _model_info_cache = get_model_info()
         model_version_gauge.labels(
-            stage=model_info.get("stage", "Unknown"),
-            version=model_info.get("version", "Unknown")
+            stage=_model_info_cache.get("stage", "Unknown"),
+            version=_model_info_cache.get("version", "Unknown")
         ).set(1)
     except Exception:
         pass
@@ -130,7 +131,7 @@ def health_check():
     Health check endpoint for load balancers and orchestration.
     Returns system status and component health.
     """
-    model_info = get_model_info()
+    model_info = _model_info_cache
     
     # Check feature store connectivity
     feature_store_ok = False
@@ -157,7 +158,7 @@ def predict(data: PredictRequest):
     Make predictions using the registered MLflow model.
     Supports batch predictions for multiple entities.
     """
-    model_info = get_model_info()
+    model_info = _model_info_cache
     endpoint = "predict"
     stage = model_info.get("stage", "unknown")
     
@@ -209,7 +210,7 @@ def predict_with_explain(
     """
     Get features from Feast and make predictions with optional explanations.
     """
-    model_info = get_model_info()
+    model_info = _model_info_cache
     endpoint = "predict_explain"
     stage = model_info.get("stage", "unknown")
     
