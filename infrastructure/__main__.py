@@ -69,7 +69,7 @@ github_actions_role = aws.iam.Role(
 github_actions_policy = aws.iam.Policy(
     "github-actions-policy",
     name=f"modelserve-github-actions-policy-{env}",
-    policy=json.dumps({
+    policy=artifacts_bucket.bucket.apply(lambda bucket: json.dumps({
         "Version": "2012-10-17",
         "Statement": [
             {
@@ -93,20 +93,33 @@ github_actions_policy = aws.iam.Policy(
                 "Resource": f"arn:aws:ecr:{region}:{account_id}:repository/modelserve*",
             },
             {
-                "Sid": "EC2Connect",
-                "Effect": "Allow",
-                "Action": "ec2-instance-connect:SendSSHPublicKey",
-                "Resource": f"arn:aws:ec2:{region}:{account_id}:instance/*",
-                "Condition": {"StringEquals": {"ec2:osuser": "ec2-user"}},
-            },
-            {
                 "Sid": "EC2Describe",
                 "Effect": "Allow",
                 "Action": "ec2:DescribeInstances",
                 "Resource": "*",
             },
+            {
+                "Sid": "SSMRunCommand",
+                "Effect": "Allow",
+                "Action": [
+                    "ssm:SendCommand",
+                    "ssm:GetCommandInvocation",
+                    "ssm:ListCommandInvocations",
+                ],
+                "Resource": [
+                    f"arn:aws:ssm:{region}::document/AWS-RunShellScript",
+                    f"arn:aws:ec2:{region}:{account_id}:instance/*",
+                    f"arn:aws:ssm:{region}:{account_id}:*",
+                ],
+            },
+            {
+                "Sid": "S3DeployUpload",
+                "Effect": "Allow",
+                "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+                "Resource": f"arn:aws:s3:::{bucket}/deploy/*",
+            },
         ],
-    }),
+    })),
     tags=tags,
 )
 
@@ -205,6 +218,7 @@ instance_role = aws.iam.Role(
 for policy_arn, logical_name in [
     ("arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly", "ecr-read"),
     ("arn:aws:iam::aws:policy/AmazonS3FullAccess", "s3-full"),
+    ("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore", "ssm-core"),
 ]:
     aws.iam.RolePolicyAttachment(
         f"instance-{logical_name}",
