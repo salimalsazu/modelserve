@@ -315,13 +315,15 @@ ami = aws.ec2.get_ami(
 ssh_public_key = cfg.require("ssh_public_key")
 
 user_data = f"""#!/bin/bash
-# SSH key first — sshd reads authorized_keys per-connection so this
-# takes effect immediately even while the rest of user_data runs.
+# Write SSH key before anything else — no set -e yet so a failure here
+# doesn't abort the rest of setup.
 mkdir -p /home/ec2-user/.ssh
 echo '{ssh_public_key}' > /home/ec2-user/.ssh/authorized_keys
 chmod 700 /home/ec2-user/.ssh
 chmod 600 /home/ec2-user/.ssh/authorized_keys
 chown -R ec2-user:ec2-user /home/ec2-user/.ssh
+# Fix SELinux context so sshd can read the key on AL2023
+restorecon -Rv /home/ec2-user/.ssh || true
 
 set -e
 dnf update -y
@@ -345,6 +347,7 @@ ec2 = aws.ec2.Instance(
     iam_instance_profile=instance_profile.name,
     associate_public_ip_address=True,
     user_data=user_data,
+    user_data_replace_on_change=True,
     root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(
         volume_size=30,
         volume_type="gp3",
