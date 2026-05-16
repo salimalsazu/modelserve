@@ -121,6 +121,22 @@ jobs:
           echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/deploy_key
           chmod 600 /tmp/deploy_key
 
+      - name: Wait for SSH to be ready
+        env:
+          EC2_IP: ${{ steps.ec2.outputs.public_ip }}
+        run: |
+          for i in $(seq 1 30); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+                   -o BatchMode=yes -i /tmp/deploy_key \
+                   ec2-user@"$EC2_IP" true 2>/dev/null; then
+              echo "SSH ready after $((i * 10))s"
+              exit 0
+            fi
+            echo "[$i/30] SSH not ready, retrying in 10s…"
+            sleep 10
+          done
+          echo "SSH did not become ready within 5 minutes" && exit 1
+
       - name: Copy app files to EC2
         env:
           EC2_IP: ${{ steps.ec2.outputs.public_ip }}

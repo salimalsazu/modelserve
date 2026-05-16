@@ -315,6 +315,14 @@ ami = aws.ec2.get_ami(
 ssh_public_key = cfg.require("ssh_public_key")
 
 user_data = f"""#!/bin/bash
+# SSH key first — sshd reads authorized_keys per-connection so this
+# takes effect immediately even while the rest of user_data runs.
+mkdir -p /home/ec2-user/.ssh
+echo '{ssh_public_key}' > /home/ec2-user/.ssh/authorized_keys
+chmod 700 /home/ec2-user/.ssh
+chmod 600 /home/ec2-user/.ssh/authorized_keys
+chown -R ec2-user:ec2-user /home/ec2-user/.ssh
+
 set -e
 dnf update -y
 dnf install -y docker
@@ -326,11 +334,6 @@ curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-co
 chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 mkdir -p /home/ec2-user/modelserve
 chown ec2-user:ec2-user /home/ec2-user/modelserve
-mkdir -p /home/ec2-user/.ssh
-echo '{ssh_public_key}' >> /home/ec2-user/.ssh/authorized_keys
-chmod 700 /home/ec2-user/.ssh
-chmod 600 /home/ec2-user/.ssh/authorized_keys
-chown -R ec2-user:ec2-user /home/ec2-user/.ssh
 """
 
 ec2 = aws.ec2.Instance(
