@@ -1,21 +1,30 @@
 # ModelServe
 
-Production-grade ML inference platform for real-time fraud detection. Built with FastAPI, MLflow, Feast, and deployed on AWS via Pulumi + GitHub Actions CI/CD.
+Production-grade ML inference platform for real-time fraud detection. Built with FastAPI, MLflow, and deployed on AWS via Pulumi + GitHub Actions CI/CD.
 
 ---
 
 ## Architecture
 
 ```
-Developer pushes code
-        ↓
+Developer pushes to main
+         ↓
 GitHub Actions (OIDC — no stored AWS credentials)
-        ↓
-Build API + MLflow Docker images → push to ECR
-        ↓
-SSH into EC2 via EC2 Instance Connect (ephemeral key)
-        ↓
-docker compose up → health check → live
+         ↓
+ ┌───────────────┐     ┌──────────────────┐
+ │  Run Tests    │────▶│  Build & Push    │
+ │  (pytest)     │     │  API + MLflow    │
+ └───────────────┘     │  images → ECR    │
+                       └────────┬─────────┘
+                                ↓
+                       ┌──────────────────┐
+                       │  Deploy to EC2   │
+                       │  SSH (stored key)│
+                       │  docker compose  │
+                       │  up -d           │
+                       └────────┬─────────┘
+                                ↓
+                       Health check → live
 ```
 
 **Stack:**
@@ -24,163 +33,241 @@ docker compose up → health check → live
 |---|---|
 | API | FastAPI + Uvicorn |
 | Model Registry | MLflow 2.14 |
-| Feature Store | Feast + Redis |
-| Database | PostgreSQL 15 |
 | Monitoring | Prometheus + Grafana |
 | Infrastructure | Pulumi (Python) on AWS |
 | CI/CD | GitHub Actions + OIDC |
 | Container Registry | AWS ECR |
-| Compute | AWS EC2 t3.medium |
+| Compute | AWS EC2 t3.medium (Amazon Linux 2023) |
 
 ---
 
-## Quick Start
+## Live Endpoints
 
-### 1. Clone the repository
+| Service | URL |
+|---|---|
+| API | http://13.228.174.98:8000 |
+| API Docs (Swagger) | http://13.228.174.98:8000/docs |
+| MLflow UI | http://13.228.174.98:5000 |
+| Prometheus | http://13.228.174.98:9090 |
+| Grafana | http://13.228.174.98:3000 (admin / admin) |
+
+---
+
+## Quick Start (Local)
 
 ```bash
 git clone https://github.com/salimalsazu/modelserve.git
 cd modelserve
-```
-
-### 2. Install dependencies locally
-
-```bash
 pip install -r requirements.txt
-```
 
-### 3. Run locally with Docker Compose
-
-```bash
+# Run all services locally
 docker compose up -d
 ```
 
-Services will be available at:
-
-| Service | URL |
-|---|---|
-| API | http://localhost:8000 |
-| API Docs | http://localhost:8000/docs |
-| MLflow | http://localhost:5000 |
-| Prometheus | http://localhost:9090 |
-| Grafana | http://localhost:3000 |
+Local URLs match the live endpoints above but on `localhost`.
 
 ---
 
-## Infrastructure Setup (One-Time)
+## Infrastructure Setup (First Time Only)
 
-This provisions all AWS resources — EC2, ECR, VPC, S3, IAM, OIDC role.
+Follow these steps once when setting up a new environment from scratch.
 
 ### Prerequisites
 
-- [AWS CLI](https://aws.amazon.com/cli/) configured with admin credentials
-- [Pulumi CLI](https://www.pulumi.com/docs/install/) installed
-- Python 3.10+
+| Tool | Install |
+|---|---|
+| AWS CLI | https://aws.amazon.com/cli/ |
+| Pulumi CLI | https://www.pulumi.com/docs/install/ |
+| Python 3.10+ | https://www.python.org/ |
+| Docker | https://docs.docker.com/get-docker/ |
 
-### Configure AWS credentials
+### Step 1 — Configure AWS credentials
 
 ```bash
 aws configure
-# AWS Access Key ID: <your key>
+# AWS Access Key ID:     <your key>
 # AWS Secret Access Key: <your secret>
-# Default region: ap-southeast-1
-# Default output: json
+# Default region:        ap-southeast-1
+# Default output:        json
 ```
 
-### Run the bootstrap script
+### Step 2 — Generate the deploy SSH key pair
+
+This key is used by GitHub Actions to SSH into EC2 for deployments.
 
 **Windows (PowerShell):**
 ```powershell
-$env:PULUMI_CONFIG_PASSPHRASE = ""
-.\setup.ps1
+ssh-keygen -t ed25519 -f "$env:USERPROFILE\deploy_key" -N '""'
 ```
 
 **Mac/Linux:**
 ```bash
-bash setup.sh
+ssh-keygen -t ed25519 -f ~/.ssh/deploy_key -N ""
 ```
 
-The script will:
-1. Create a Python venv and install Pulumi providers
-2. Show a preview of all AWS resources to be created
-3. Ask for confirmation before applying
-4. Print all outputs (EC2 IP, ECR URLs, role ARN)
+Keep both files — you will need them in the next two steps.
+
+### Step 3 — Bootstrap the infrastructure
+
+```powershell
+# Windows
+cd infrastructure
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# Set the public key in Pulumi config
+$pubkey = Get-Content "$env:USERPROFILE\deploy_key.pub"
+pulumi config set ssh_public_key $pubkey
+
+# Preview and apply
+pulumi up --yes
+```
+
+```bash
+# Mac/Linux
+cd infrastructure
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+pulumi config set ssh_public_key "$(cat ~/.ssh/deploy_key.pub)"
+pulumi up --yes
+```
+
+Note the outputs — you will need `ec2_public_ip` and `github_actions_role_arn`.
 
 ### AWS resources created
 
 | Resource | Details |
 |---|---|
-| VPC | 10.0.0.0/16 with public subnet |
+| VPC | 10.0.0.0/16 with public subnet in ap-southeast-1a |
 | EC2 | t3.medium, Amazon Linux 2023, 30 GB gp3 |
-| Elastic IP | Static public IP |
-| Security Group | Ports 22, 80, 8000, 5000, 9090, 3000 |
+| Elastic IP | Static public IP (survives instance replacement) |
+| Security Group | Ports 22, 80, 8000, 5000, 9090, 3000 open |
 | ECR | `modelserve-api-prod` + `modelserve-mlflow-prod` |
-| S3 | Private bucket for MLflow artifacts |
-| IAM | Instance role (ECR read + S3) |
-| OIDC + IAM Role | GitHub Actions assumes this — no static keys needed |
+| S3 | Private bucket for MLflow artifacts + deploy staging |
+| IAM Instance Role | ECR read + S3 full access + SSM core |
+| IAM GitHub Role | Assumed via OIDC — no static AWS keys needed |
 
-### Set the one GitHub variable
+### Step 4 — Add GitHub repository secret
 
-After the script finishes, go to:
+Go to **Settings → Secrets and variables → Actions → New repository secret**:
 
-```
-https://github.com/salimalsazu/modelserve/settings/variables/actions
-```
+| Name | Value |
+|---|---|
+| `EC2_SSH_KEY` | Full contents of your `deploy_key` private key file |
 
-Add:
+**Windows:** `Get-Content "$env:USERPROFILE\deploy_key"`  
+**Mac/Linux:** `cat ~/.ssh/deploy_key`
+
+### Step 5 — Add GitHub repository variable
+
+Go to **Settings → Secrets and variables → Actions → Variables → New repository variable**:
 
 | Name | Value |
 |---|---|
 | `AWS_ACCOUNT_ID` | Your 12-digit AWS account ID |
 
-That's it. Every push to `main` now deploys automatically.
+### Step 6 — Push to trigger first deploy
+
+```bash
+git commit --allow-empty -m "chore: trigger initial deploy"
+git push origin main
+```
+
+The pipeline will run automatically. Watch progress at:
+`https://github.com/salimalsazu/modelserve/actions`
 
 ---
 
 ## CI/CD Pipeline
 
-File: `.github/workflows/deploy.yml`
+File: [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)
 
-### Trigger
+### Triggers
 
-- Push to `main` branch
-- Manual trigger via GitHub Actions UI (`workflow_dispatch`)
+- Every push to `main`
+- Manual via GitHub Actions UI (`workflow_dispatch`)
 
 ### Jobs
 
-**1. Build & Push**
-- Assumes AWS role via OIDC (zero stored credentials)
-- Builds API and MLflow Docker images
-- Pushes to ECR with commit SHA tag + `latest`
-- Uses GitHub Actions layer cache to speed up builds
-
-**2. Deploy**
-- Looks up EC2 instance by `Name=modelserve-prod` tag
-- Sends ephemeral SSH key via EC2 Instance Connect (60s TTL)
-- Copies `docker-compose.yml`, `monitoring/`, and model file to EC2
-- Pulls new images from ECR
-- Runs `docker compose up -d --remove-orphans`
-- Health checks `/health` (10 retries × 15s)
-
-### How OIDC works (no AWS secrets needed)
-
 ```
-GitHub runner requests OIDC token from GitHub
-        ↓
-aws-actions/configure-aws-credentials exchanges it
-        ↓
-AWS STS issues temporary credentials (1 hour TTL)
-        ↓
-Runner has ECR push + EC2 connect permissions
+test ──▶ build-push ──▶ deploy
 ```
 
-No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` stored anywhere.
+**test**
+- Installs Python dependencies
+- Runs `pytest app/tests/` with short tracebacks
+
+**build-push**
+- Assumes AWS role via OIDC (no stored credentials)
+- Builds API image from `Dockerfile`
+- Builds MLflow image from `Dockerfile.mlflow`
+- Pushes both to ECR tagged with commit SHA + `latest`
+- Uses GitHub Actions layer cache for fast rebuilds
+
+**deploy**
+- Looks up EC2 instance by tag `Name=modelserve-prod`
+- Writes `EC2_SSH_KEY` secret to a temp file
+- Waits up to 5 minutes for SSH to become ready (handles fresh instances)
+- Copies `docker-compose.yml`, `monitoring/`, and `fraud_model_v2.pkl` to EC2 via SCP
+- SSHs into EC2 and runs:
+  - `docker login` to ECR
+  - `docker pull` new images
+  - `docker compose up -d --remove-orphans`
+- Health checks `GET /health` (10 retries × 15 s)
+- Prints live service URLs to the job summary
+
+### How OIDC works (no AWS secrets in GitHub)
+
+```
+GitHub runner requests OIDC token
+         ↓
+aws-actions/configure-aws-credentials exchanges it with AWS STS
+         ↓
+Temporary credentials issued (1 hour TTL)
+         ↓
+Runner can push to ECR and describe EC2 instances
+```
+
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are never stored anywhere.
+
+### Re-deploying without a code change
+
+```bash
+git commit --allow-empty -m "chore: redeploy"
+git push origin main
+```
+
+---
+
+## Reprovisioning the EC2 Instance
+
+If you need to replace the EC2 instance (e.g. after rotating the SSH key):
+
+```powershell
+cd infrastructure
+
+# Generate new key pair
+ssh-keygen -t ed25519 -f "$env:USERPROFILE\deploy_key" -N '""'
+
+# Update Pulumi config with new public key
+$pubkey = Get-Content "$env:USERPROFILE\deploy_key.pub"
+pulumi config set ssh_public_key $pubkey
+
+# Replace the instance (user_data_replace_on_change=True handles this)
+pulumi up --yes
+```
+
+Then update the `EC2_SSH_KEY` GitHub secret with the new private key.  
+The Elastic IP stays the same — no DNS changes needed.
 
 ---
 
 ## Model Training
 
-### Train with synthetic data (default)
+### Train locally (synthetic data)
 
 ```bash
 python training/train.py
@@ -189,12 +276,15 @@ python training/train.py
 ### Train with a CSV file
 
 ```bash
-python training/train.py --data-path /path/to/data.csv
+python training/train.py --data-path /path/to/creditcard.csv
 ```
 
 ### Train and register to MLflow
 
 ```bash
+# Point at the production MLflow server
+export MLFLOW_TRACKING_URI=http://13.228.174.98:5000
+
 python training/train.py --register --stage Production
 ```
 
@@ -206,47 +296,41 @@ export KAGGLE_KEY=your_api_key
 python training/train.py --kaggle-dataset mlg-ulb/creditcardfraud --register
 ```
 
-### Register model on production EC2
+### Register model on the EC2 instance directly
 
 ```bash
-ssh ec2-user@52.221.26.39
+ssh -i ~/deploy_key ec2-user@13.228.174.98
 docker exec modelserve-api python training/train.py --register --stage Production
 ```
-
-### Training output
-
-- Metrics logged to MLflow at `http://52.221.26.39:5000`
-- Model registered under `modelserve-model` in MLflow registry
-- Local pickle saved to `/tmp/models/fraud_model_vN.pkl`
 
 **Metrics tracked:**
 
 | Metric | Description |
 |---|---|
-| `accuracy` | Overall accuracy |
-| `precision` | Precision for fraud class |
-| `recall` | Recall for fraud class |
+| `accuracy` | Overall classification accuracy |
+| `precision` | Precision on fraud class |
+| `recall` | Recall on fraud class |
 | `f1` | F1 score |
-| `roc_auc` | ROC-AUC score |
+| `roc_auc` | Area under ROC curve |
 
 ---
 
 ## API Reference
 
-Base URL: `http://52.221.26.39:8000`
+Base URL: `http://13.228.174.98:8000`
 
 ### POST `/predict`
 
-Make a fraud prediction from a raw feature vector.
+Predict fraud from a raw feature vector (V1–V28 + Amount = 29 features).
 
 **Request:**
 ```json
 {
   "entity_id": 1,
   "features": [-1.0, 2.0, 1.5, -0.5, 1.2, 0.8, -1.0, -0.3,
-                -1.5, -0.9, -0.2, -1.1, -0.7, -0.8, 0.4, -1.3,
-                -0.9, 0.6, 1.0, 0.3, 0.5, 0.8, -1.2, 0.9,
-                1.1, -0.4, 0.7, 0.2, 27]
+               -1.5, -0.9, -0.2, -1.1, -0.7, -0.8, 0.4, -1.3,
+               -0.9, 0.6, 1.0, 0.3, 0.5, 0.8, -1.2, 0.9,
+                1.1, -0.4, 0.7, 0.2, 27.0]
 }
 ```
 
@@ -254,28 +338,28 @@ Make a fraud prediction from a raw feature vector.
 ```json
 {
   "prediction": 0,
-  "probability": 0.39,
+  "probability": 0.04,
   "model_version": "1",
   "model_stage": "Production",
-  "timestamp": "2026-05-16T00:00:00Z",
-  "latency_ms": 12.3
+  "timestamp": "2026-05-16T10:00:00Z",
+  "latency_ms": 8.2
 }
 ```
 
-`prediction: 0` = legitimate transaction, `prediction: 1` = fraud
+`prediction: 0` = legitimate, `prediction: 1` = fraud.
 
 ### GET `/predict/{entity_id}`
 
-Fetch features from Feast feature store and predict with SHAP explanations.
+Fetch features from the feature store and predict with optional SHAP explanations.
 
 ```bash
-curl "http://52.221.26.39:8000/predict/123?explain=true"
+curl "http://13.228.174.98:8000/predict/123?explain=true"
 ```
 
 ### GET `/health`
 
 ```bash
-curl http://52.221.26.39:8000/health
+curl http://13.228.174.98:8000/health
 ```
 
 ```json
@@ -283,16 +367,18 @@ curl http://52.221.26.39:8000/health
   "status": "healthy",
   "model_version": "1",
   "model_stage": "Production",
-  "feature_store_connected": true,
+  "feature_store_connected": false,
   "mlflow_tracking_uri": "http://mlflow:5000",
-  "timestamp": "2026-05-16T00:00:00Z"
+  "timestamp": "2026-05-16T10:00:00Z"
 }
 ```
 
 ### GET `/model/info`
 
+Returns current model metadata from MLflow registry.
+
 ```bash
-curl http://52.221.26.39:8000/model/info
+curl http://13.228.174.98:8000/model/info
 ```
 
 ### GET `/metrics`
@@ -300,76 +386,65 @@ curl http://52.221.26.39:8000/model/info
 Prometheus metrics in text format.
 
 ```bash
-curl http://52.221.26.39:8000/metrics
+curl http://13.228.174.98:8000/metrics
 ```
 
 ### GET `/docs`
 
-Interactive Swagger UI — open in browser:
+Interactive Swagger UI — open in a browser:
+
 ```
-http://52.221.26.39:8000/docs
+http://13.228.174.98:8000/docs
 ```
 
 ---
 
 ## Model Loading Strategy
 
-The API uses a graceful fallback chain on startup:
+The API tries three sources in order at startup:
 
 ```
 1. MLflow registry  →  models:/modelserve-model/Production
-        ↓ if fails
+        ↓ fails (registry empty or unreachable)
 2. Local pickle     →  /app/models/model.pkl
-        ↓ if fails
-3. Degraded mode    →  /health returns "degraded"
-                        /predict returns HTTP 503
+        ↓ fails (file missing)
+3. Degraded mode    →  GET /health returns "degraded"
+                        POST /predict returns HTTP 503
 ```
 
 ---
 
 ## Monitoring
 
-### Grafana dashboard
-
-```
-http://52.221.26.39:3000
-Username: admin  |  Password: admin
-```
-
-### MLflow UI
-
-```
-http://52.221.26.39:5000
-```
-
-### Prometheus
-
-```
-http://52.221.26.39:9090
-```
-
-### Prometheus metrics exposed
+### Prometheus metrics
 
 | Metric | Description |
 |---|---|
 | `prediction_requests_total` | Request count by endpoint and model stage |
 | `prediction_errors_total` | Error count by error type |
-| `prediction_latency_seconds` | Prediction latency histogram |
+| `prediction_latency_seconds` | Latency histogram (p50/p95/p99) |
 | `model_version_info` | Current model version and stage |
 | `feature_store_latency_seconds` | Feast online lookup latency |
 
+### Dashboards
+
+| Service | URL | Credentials |
+|---|---|---|
+| Grafana | http://13.228.174.98:3000 | admin / admin |
+| Prometheus | http://13.228.174.98:9090 | — |
+| MLflow | http://13.228.174.98:5000 | — |
+
 ---
 
-## Destroy Infrastructure
-
-To tear down all AWS resources:
+## Destroying Infrastructure
 
 ```powershell
 cd infrastructure
-$env:PULUMI_CONFIG_PASSPHRASE = ""
 .\.venv\Scripts\Activate.ps1
 pulumi destroy --yes
 ```
+
+This terminates the EC2 instance, deletes ECR images, removes the S3 bucket, and tears down all networking. The operation is irreversible.
 
 ---
 
@@ -378,27 +453,43 @@ pulumi destroy --yes
 ```
 modelserve/
 ├── app/
-│   ├── main.py              # FastAPI app + all endpoints
-│   ├── model_loader.py      # MLflow + local model loading
+│   ├── main.py              # FastAPI app, all endpoints, startup cache
+│   ├── model_loader.py      # MLflow + local model loading (5 s timeout)
 │   ├── feature_client.py    # Feast online feature retrieval
-│   └── metrics.py           # Prometheus metrics definitions
+│   ├── metrics.py           # Prometheus metric definitions
+│   └── tests/
+│       └── test_predict.py  # Pytest suite (26 tests)
 ├── training/
 │   └── train.py             # Model training + MLflow registration
 ├── infrastructure/
-│   ├── __main__.py          # Pulumi — all AWS resources + OIDC
-│   ├── Pulumi.yaml          # Pulumi project config
-│   └── requirements.txt     # Pulumi Python deps
+│   ├── __main__.py          # Pulumi — all AWS resources
+│   ├── Pulumi.yaml          # Project name + runtime
+│   ├── Pulumi.prod.yaml     # Stack config (ssh_public_key stored here)
+│   └── requirements.txt     # Pulumi Python providers
 ├── monitoring/
-│   ├── prometheus/          # prometheus.yml + alerts.yml
-│   └── grafana/             # Dashboards + datasource config
-├── feast_repo/              # Feast feature definitions
+│   ├── prometheus/          # prometheus.yml scrape config + alert rules
+│   └── grafana/             # Dashboard JSON + datasource provisioning
 ├── .github/workflows/
-│   └── deploy.yml           # Full CI/CD pipeline
-├── Dockerfile               # API image (Python 3.10-slim)
-├── Dockerfile.mlflow        # MLflow server image
-├── docker-compose.yml       # All services (local + production)
-├── setup.ps1                # Windows one-time bootstrap
-├── setup.sh                 # Mac/Linux one-time bootstrap
-├── fraud_model_v2.pkl       # Pre-trained model (fallback)
-└── requirements.txt         # Python dependencies
+│   └── deploy.yml           # Full CI/CD: test → build → deploy
+├── Dockerfile               # API image (python:3.10-slim)
+├── Dockerfile.mlflow        # MLflow tracking server image
+├── docker-compose.yml       # All services for local and production
+├── fraud_model_v2.pkl       # Pre-trained fallback model
+└── requirements.txt         # Python runtime dependencies
 ```
+
+---
+
+## Troubleshooting
+
+**Deploy fails with "SSH not ready"**  
+The EC2 instance may still be booting. The workflow retries for 5 minutes automatically. If it consistently times out, check that `EC2_SSH_KEY` secret matches the public key set in `pulumi config`.
+
+**Deploy fails with "Permission denied (publickey)"**  
+The SSH key in GitHub Secrets doesn't match the one embedded in the instance. Regenerate the key pair, update `pulumi config set ssh_public_key`, run `pulumi up --yes`, and update the `EC2_SSH_KEY` secret.
+
+**API returns 503**  
+No model is loaded. Either register a model in MLflow or ensure `fraud_model_v2.pkl` was copied to the instance (the deploy step does this automatically).
+
+**`pulumi up` shows "no project file found"**  
+You must run Pulumi from the `infrastructure/` directory, not the repo root.
