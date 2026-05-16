@@ -115,6 +115,13 @@ github_actions_policy = aws.iam.Policy(
                 ],
             },
             {
+                "Sid": "S3DeployList",
+                "Effect": "Allow",
+                "Action": "s3:ListBucket",
+                "Resource": f"arn:aws:s3:::{_artifacts_bucket_name}",
+                "Condition": {"StringLike": {"s3:prefix": "deploy/*"}},
+            },
+            {
                 "Sid": "S3DeployUpload",
                 "Effect": "Allow",
                 "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
