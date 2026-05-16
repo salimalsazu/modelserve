@@ -116,90 +116,45 @@ jobs:
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "public_ip=$PUBLIC_IP"      >> "$GITHUB_OUTPUT"
 
-      - name: Upload deploy artifacts to S3
-        env:
-          S3_BUCKET: modelserve-mlflow-artifacts-prod-${{ env.AWS_ACCOUNT_ID }}
+      - name: Write SSH key
         run: |
-          aws s3 cp docker-compose.yml     "s3://$S3_BUCKET/deploy/docker-compose.yml"
-          aws s3 sync monitoring/          "s3://$S3_BUCKET/deploy/monitoring/"
-          aws s3 cp fraud_model_v2.pkl     "s3://$S3_BUCKET/deploy/models/model.pkl"
+          echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
 
-      - name: Wait for SSM agent registration
+      - name: Copy app files to EC2
         env:
-          INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
+          EC2_IP: ${{ steps.ec2.outputs.public_ip }}
         run: |
-          echo "Waiting for SSM agent to register on $INSTANCE_ID …"
-          for i in $(seq 1 30); do
-            REGISTERED=$(aws ssm describe-instance-information \
-              --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
-              --query "InstanceInformationList[0].InstanceId" \
-              --output text 2>/dev/null || echo "None")
-            if [ "$REGISTERED" = "$INSTANCE_ID" ]; then
-              echo "SSM agent registered after $((i * 10))s"
-              exit 0
-            fi
-            # After 2 minutes of waiting, reboot once to force credential refresh
-            if [ "$i" -eq 12 ]; then
-              echo "Not registered after 2 min — rebooting instance to force SSM registration"
-              aws ec2 reboot-instances --instance-ids "$INSTANCE_ID"
-              sleep 60
-            fi
-            echo "[$i/30] Not registered yet, retrying in 10s…"
-            sleep 10
-          done
-          echo "SSM agent did not register within 5 minutes" && exit 1
+          SSH="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i /tmp/deploy_key ec2-user@$EC2_IP"
+          SCP="scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i /tmp/deploy_key"
 
-      - name: Deploy via SSM
+          $SSH "mkdir -p ~/modelserve/monitoring ~/modelserve/models"
+          $SCP docker-compose.yml          ec2-user@"$EC2_IP":~/modelserve/docker-compose.yml
+          $SCP -r monitoring/              ec2-user@"$EC2_IP":~/modelserve/
+          $SCP fraud_model_v2.pkl          ec2-user@"$EC2_IP":~/modelserve/models/model.pkl
+
+      - name: Deploy
         env:
-          INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
+          EC2_IP: ${{ steps.ec2.outputs.public_ip }}
           ECR_REGISTRY: ${{ needs.build-push.outputs.ecr_registry }}
           IMAGE_TAG: ${{ needs.build-push.outputs.image_tag }}
-          S3_BUCKET: modelserve-mlflow-artifacts-prod-${{ env.AWS_ACCOUNT_ID }}
         run: |
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters commands="[
-              'set -e',
-              'S3_BUCKET=$S3_BUCKET ECR_REGISTRY=$ECR_REGISTRY IMAGE_TAG=$IMAGE_TAG bash -s <<\"SCRIPT\"',
-              'mkdir -p ~/modelserve/monitoring ~/modelserve/models',
-              'aws s3 cp s3://\$S3_BUCKET/deploy/docker-compose.yml ~/modelserve/docker-compose.yml',
-              'aws s3 sync s3://\$S3_BUCKET/deploy/monitoring/ ~/modelserve/monitoring/',
-              'aws s3 cp s3://\$S3_BUCKET/deploy/models/model.pkl ~/modelserve/models/model.pkl',
-              'aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin \$ECR_REGISTRY',
-              'docker pull \$ECR_REGISTRY/modelserve-api-prod:\$IMAGE_TAG',
-              'docker pull \$ECR_REGISTRY/modelserve-mlflow-prod:\$IMAGE_TAG',
-              'cd ~/modelserve && API_IMAGE=\$ECR_REGISTRY/modelserve-api-prod:\$IMAGE_TAG MLFLOW_IMAGE=\$ECR_REGISTRY/modelserve-mlflow-prod:\$IMAGE_TAG docker compose up -d --remove-orphans',
-              'docker compose -f ~/modelserve/docker-compose.yml ps',
-              'SCRIPT'
-            ]" \
-            --region "${{ env.AWS_REGION }}" \
-            --output text \
-            --query "Command.CommandId")
-
-          echo "SSM command ID: $COMMAND_ID"
-
-          # Poll until command finishes (timeout 10 min)
-          for i in $(seq 1 60); do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "$COMMAND_ID" \
-              --instance-id "$INSTANCE_ID" \
-              --query "Status" --output text 2>/dev/null || echo "Pending")
-            echo "[$i/60] Status: $STATUS"
-            if [ "$STATUS" = "Success" ]; then
-              aws ssm get-command-invocation \
-                --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
-                --query "StandardOutputContent" --output text
-              exit 0
-            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "TimedOut" ] || [ "$STATUS" = "Cancelled" ]; then
-              aws ssm get-command-invocation \
-                --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
-                --query "StandardErrorContent" --output text
-              exit 1
-            fi
-            sleep 10
-          done
-          echo "SSM command timed out" && exit 1
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -i /tmp/deploy_key \
+            ec2-user@"$EC2_IP" \
+            bash -s -- "$ECR_REGISTRY" "$IMAGE_TAG" <<'REMOTE'
+          set -e
+          ECR_REGISTRY=$1
+          IMAGE_TAG=$2
+          aws ecr get-login-password --region ap-southeast-1 \
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          docker pull "$ECR_REGISTRY/modelserve-api-prod:$IMAGE_TAG"
+          docker pull "$ECR_REGISTRY/modelserve-mlflow-prod:$IMAGE_TAG"
+          cd ~/modelserve
+          API_IMAGE="$ECR_REGISTRY/modelserve-api-prod:$IMAGE_TAG" \
+          MLFLOW_IMAGE="$ECR_REGISTRY/modelserve-mlflow-prod:$IMAGE_TAG" \
+          docker compose up -d --remove-orphans
+          docker compose ps
+          REMOTE
 
       - name: Health check
         env:
