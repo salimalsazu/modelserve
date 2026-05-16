@@ -66,10 +66,12 @@ github_actions_role = aws.iam.Role(
     tags=tags,
 )
 
+_artifacts_bucket_name = f"modelserve-mlflow-artifacts-{env}-{account_id}"
+
 github_actions_policy = aws.iam.Policy(
     "github-actions-policy",
     name=f"modelserve-github-actions-policy-{env}",
-    policy=artifacts_bucket.bucket.apply(lambda bucket: json.dumps({
+    policy=json.dumps({
         "Version": "2012-10-17",
         "Statement": [
             {
@@ -116,10 +118,10 @@ github_actions_policy = aws.iam.Policy(
                 "Sid": "S3DeployUpload",
                 "Effect": "Allow",
                 "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
-                "Resource": f"arn:aws:s3:::{bucket}/deploy/*",
+                "Resource": f"arn:aws:s3:::{_artifacts_bucket_name}/deploy/*",
             },
         ],
-    })),
+    }),
     tags=tags,
 )
 
