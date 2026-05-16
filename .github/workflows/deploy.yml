@@ -113,15 +113,20 @@ jobs:
             --instance-ids "$INSTANCE_ID" \
             --query "Reservations[0].Instances[0].PublicIpAddress" \
             --output text)
+          AZ=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query "Reservations[0].Instances[0].Placement.AvailabilityZone" \
+            --output text)
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "public_ip=$PUBLIC_IP"      >> "$GITHUB_OUTPUT"
+          echo "az=$AZ"                    >> "$GITHUB_OUTPUT"
 
       - name: Send ephemeral SSH key via EC2 Instance Connect
         run: |
           ssh-keygen -t ed25519 -f /tmp/ec2_key -N "" -q
           aws ec2-instance-connect send-ssh-public-key \
             --instance-id "${{ steps.ec2.outputs.instance_id }}" \
-            --availability-zone "${{ env.AWS_REGION }}a" \
+            --availability-zone "${{ steps.ec2.outputs.az }}" \
             --instance-os-user ec2-user \
             --ssh-public-key file:///tmp/ec2_key.pub
           chmod 600 /tmp/ec2_key
