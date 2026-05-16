@@ -97,7 +97,10 @@ github_actions_policy = aws.iam.Policy(
             {
                 "Sid": "EC2Describe",
                 "Effect": "Allow",
-                "Action": "ec2:DescribeInstances",
+                "Action": [
+                    "ec2:DescribeInstances",
+                    "ec2:RebootInstances",
+                ],
                 "Resource": "*",
             },
             {
@@ -107,11 +110,13 @@ github_actions_policy = aws.iam.Policy(
                     "ssm:SendCommand",
                     "ssm:GetCommandInvocation",
                     "ssm:ListCommandInvocations",
+                    "ssm:DescribeInstanceInformation",
                 ],
                 "Resource": [
                     f"arn:aws:ssm:{region}::document/AWS-RunShellScript",
                     f"arn:aws:ec2:{region}:{account_id}:instance/*",
                     f"arn:aws:ssm:{region}:{account_id}:*",
+                    "*",
                 ],
             },
             {

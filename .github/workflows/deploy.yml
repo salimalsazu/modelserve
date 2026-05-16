@@ -124,6 +124,31 @@ jobs:
           aws s3 sync monitoring/          "s3://$S3_BUCKET/deploy/monitoring/"
           aws s3 cp fraud_model_v2.pkl     "s3://$S3_BUCKET/deploy/models/model.pkl"
 
+      - name: Wait for SSM agent registration
+        env:
+          INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
+        run: |
+          echo "Waiting for SSM agent to register on $INSTANCE_ID …"
+          for i in $(seq 1 30); do
+            REGISTERED=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+              --query "InstanceInformationList[0].InstanceId" \
+              --output text 2>/dev/null || echo "None")
+            if [ "$REGISTERED" = "$INSTANCE_ID" ]; then
+              echo "SSM agent registered after $((i * 10))s"
+              exit 0
+            fi
+            # After 2 minutes of waiting, reboot once to force credential refresh
+            if [ "$i" -eq 12 ]; then
+              echo "Not registered after 2 min — rebooting instance to force SSM registration"
+              aws ec2 reboot-instances --instance-ids "$INSTANCE_ID"
+              sleep 60
+            fi
+            echo "[$i/30] Not registered yet, retrying in 10s…"
+            sleep 10
+          done
+          echo "SSM agent did not register within 5 minutes" && exit 1
+
       - name: Deploy via SSM
         env:
           INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
